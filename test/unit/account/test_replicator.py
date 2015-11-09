@@ -77,8 +77,8 @@ class TestReplicatorSync(test_db_replicator.TestReplicatorSync):
         # add a row to "local" db
         broker.put_container('/a/c', time.time(), 0, 0, 0,
                              POLICIES.default.idx)
-        #replicate
-        daemon = replicator.AccountReplicator({})
+        # replicate
+        daemon = replicator.AccountReplicator({'per_diff': 1})
 
         def _rsync_file(db_file, remote_file, **kwargs):
             remote_server, remote_path = remote_file.split('/', 1)

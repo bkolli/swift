@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """Tests for swift.common.utils"""
-
+from __future__ import print_function
 from test.unit import temptree
 
 import ctypes
@@ -34,6 +34,9 @@ import sys
 import json
 import math
 
+from six import BytesIO, StringIO
+from six.moves.queue import Queue, Empty
+from six.moves import range
 from textwrap import dedent
 
 import tempfile
@@ -43,16 +46,14 @@ import traceback
 import unittest
 import fcntl
 import shutil
-from contextlib import nested
 
-from Queue import Queue, Empty
 from getpass import getuser
 from shutil import rmtree
-from StringIO import StringIO
 from functools import partial
 from tempfile import TemporaryFile, NamedTemporaryFile, mkdtemp
 from netifaces import AF_INET6
 from mock import MagicMock, patch
+from six.moves.configparser import NoSectionError, NoOptionError
 
 from swift.common.exceptions import (Timeout, MessageTimeout,
                                      ConnectionTimeout, LockTimeout,
@@ -60,7 +61,7 @@ from swift.common.exceptions import (Timeout, MessageTimeout,
                                      MimeInvalid, ThreadPoolDead)
 from swift.common import utils
 from swift.common.container_sync_realms import ContainerSyncRealms
-from swift.common.swob import Request, Response
+from swift.common.swob import Request, Response, HeaderKeyDict
 from test.unit import FakeLogger
 
 
@@ -403,6 +404,44 @@ class TestTimestamp(unittest.TestCase):
             self.assertTrue(timestamp > float(normal),
                             '%r is not bigger than %f given %r' % (
                                 timestamp, float(normal), value))
+
+    def test_raw(self):
+        expected = 140243640891203
+        timestamp = utils.Timestamp(1402436408.91203)
+        self.assertEqual(expected, timestamp.raw)
+
+        # 'raw' does not include offset
+        timestamp = utils.Timestamp(1402436408.91203, 0xf0)
+        self.assertEqual(expected, timestamp.raw)
+
+    def test_delta(self):
+        def _assertWithinBounds(expected, timestamp):
+            tolerance = 0.00001
+            minimum = expected - tolerance
+            maximum = expected + tolerance
+            self.assertTrue(float(timestamp) > minimum)
+            self.assertTrue(float(timestamp) < maximum)
+
+        timestamp = utils.Timestamp(1402436408.91203, delta=100)
+        _assertWithinBounds(1402436408.91303, timestamp)
+        self.assertEqual(140243640891303, timestamp.raw)
+
+        timestamp = utils.Timestamp(1402436408.91203, delta=-100)
+        _assertWithinBounds(1402436408.91103, timestamp)
+        self.assertEqual(140243640891103, timestamp.raw)
+
+        timestamp = utils.Timestamp(1402436408.91203, delta=0)
+        _assertWithinBounds(1402436408.91203, timestamp)
+        self.assertEqual(140243640891203, timestamp.raw)
+
+        # delta is independent of offset
+        timestamp = utils.Timestamp(1402436408.91203, offset=42, delta=100)
+        self.assertEqual(140243640891303, timestamp.raw)
+        self.assertEqual(42, timestamp.offset)
+
+        # cannot go negative
+        self.assertRaises(ValueError, utils.Timestamp, 1402436408.91203,
+                          delta=-140243640891203)
 
     def test_int(self):
         expected = 1402437965
@@ -822,60 +861,60 @@ class TestUtils(unittest.TestCase):
 
     def test_normalize_timestamp(self):
         # Test swift.common.utils.normalize_timestamp
-        self.assertEquals(utils.normalize_timestamp('1253327593.48174'),
-                          "1253327593.48174")
-        self.assertEquals(utils.normalize_timestamp(1253327593.48174),
-                          "1253327593.48174")
-        self.assertEquals(utils.normalize_timestamp('1253327593.48'),
-                          "1253327593.48000")
-        self.assertEquals(utils.normalize_timestamp(1253327593.48),
-                          "1253327593.48000")
-        self.assertEquals(utils.normalize_timestamp('253327593.48'),
-                          "0253327593.48000")
-        self.assertEquals(utils.normalize_timestamp(253327593.48),
-                          "0253327593.48000")
-        self.assertEquals(utils.normalize_timestamp('1253327593'),
-                          "1253327593.00000")
-        self.assertEquals(utils.normalize_timestamp(1253327593),
-                          "1253327593.00000")
+        self.assertEqual(utils.normalize_timestamp('1253327593.48174'),
+                         "1253327593.48174")
+        self.assertEqual(utils.normalize_timestamp(1253327593.48174),
+                         "1253327593.48174")
+        self.assertEqual(utils.normalize_timestamp('1253327593.48'),
+                         "1253327593.48000")
+        self.assertEqual(utils.normalize_timestamp(1253327593.48),
+                         "1253327593.48000")
+        self.assertEqual(utils.normalize_timestamp('253327593.48'),
+                         "0253327593.48000")
+        self.assertEqual(utils.normalize_timestamp(253327593.48),
+                         "0253327593.48000")
+        self.assertEqual(utils.normalize_timestamp('1253327593'),
+                         "1253327593.00000")
+        self.assertEqual(utils.normalize_timestamp(1253327593),
+                         "1253327593.00000")
         self.assertRaises(ValueError, utils.normalize_timestamp, '')
         self.assertRaises(ValueError, utils.normalize_timestamp, 'abc')
 
     def test_normalize_delete_at_timestamp(self):
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp(1253327593),
             '1253327593')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp(1253327593.67890),
             '1253327593')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp('1253327593'),
             '1253327593')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp('1253327593.67890'),
             '1253327593')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp(-1253327593),
             '0000000000')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp(-1253327593.67890),
             '0000000000')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp('-1253327593'),
             '0000000000')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp('-1253327593.67890'),
             '0000000000')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp(71253327593),
             '9999999999')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp(71253327593.67890),
             '9999999999')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp('71253327593'),
             '9999999999')
-        self.assertEquals(
+        self.assertEqual(
             utils.normalize_delete_at_timestamp('71253327593.67890'),
             '9999999999')
         self.assertRaises(ValueError, utils.normalize_timestamp, '')
@@ -916,50 +955,50 @@ class TestUtils(unittest.TestCase):
         # all of the boundary conditions and typical conditions.
         # Block boundaries are marked with '<>' characters
         blocksize = 25
-        lines = ['123456789x12345678><123456789\n',  # block larger than rest
-                 '123456789x123>\n',  # block ends just before \n character
-                 '123423456789\n',
-                 '123456789x\n',  # block ends at the end of line
-                 '<123456789x123456789x123\n',
-                 '<6789x123\n',  # block ends at the beginning of the line
-                 '6789x1234\n',
-                 '1234><234\n',  # block ends typically in the middle of line
-                 '123456789x123456789\n']
+        lines = [b'123456789x12345678><123456789\n',  # block larger than rest
+                 b'123456789x123>\n',  # block ends just before \n character
+                 b'123423456789\n',
+                 b'123456789x\n',  # block ends at the end of line
+                 b'<123456789x123456789x123\n',
+                 b'<6789x123\n',  # block ends at the beginning of the line
+                 b'6789x1234\n',
+                 b'1234><234\n',  # block ends typically in the middle of line
+                 b'123456789x123456789\n']
 
-        with TemporaryFile('r+w') as f:
+        with TemporaryFile() as f:
             for line in lines:
                 f.write(line)
 
             count = len(lines) - 1
             for line in utils.backward(f, blocksize):
-                self.assertEquals(line, lines[count].split('\n')[0])
+                self.assertEqual(line, lines[count].split(b'\n')[0])
                 count -= 1
 
         # Empty file case
         with TemporaryFile('r') as f:
-            self.assertEquals([], list(utils.backward(f)))
+            self.assertEqual([], list(utils.backward(f)))
 
     def test_mkdirs(self):
         testdir_base = mkdtemp()
         testroot = os.path.join(testdir_base, 'mkdirs')
         try:
-            self.assert_(not os.path.exists(testroot))
+            self.assertTrue(not os.path.exists(testroot))
             utils.mkdirs(testroot)
-            self.assert_(os.path.exists(testroot))
+            self.assertTrue(os.path.exists(testroot))
             utils.mkdirs(testroot)
-            self.assert_(os.path.exists(testroot))
+            self.assertTrue(os.path.exists(testroot))
             rmtree(testroot, ignore_errors=1)
 
             testdir = os.path.join(testroot, 'one/two/three')
-            self.assert_(not os.path.exists(testdir))
+            self.assertTrue(not os.path.exists(testdir))
             utils.mkdirs(testdir)
-            self.assert_(os.path.exists(testdir))
+            self.assertTrue(os.path.exists(testdir))
             utils.mkdirs(testdir)
-            self.assert_(os.path.exists(testdir))
+            self.assertTrue(os.path.exists(testdir))
             rmtree(testroot, ignore_errors=1)
 
             open(testroot, 'wb').close()
-            self.assert_(not os.path.exists(testdir))
+            self.assertTrue(not os.path.exists(testdir))
             self.assertRaises(OSError, utils.mkdirs, testdir)
             os.unlink(testroot)
         finally:
@@ -970,9 +1009,9 @@ class TestUtils(unittest.TestCase):
         self.assertRaises(ValueError, utils.split_path, '')
         self.assertRaises(ValueError, utils.split_path, '/')
         self.assertRaises(ValueError, utils.split_path, '//')
-        self.assertEquals(utils.split_path('/a'), ['a'])
+        self.assertEqual(utils.split_path('/a'), ['a'])
         self.assertRaises(ValueError, utils.split_path, '//a')
-        self.assertEquals(utils.split_path('/a/'), ['a'])
+        self.assertEqual(utils.split_path('/a/'), ['a'])
         self.assertRaises(ValueError, utils.split_path, '/a/c')
         self.assertRaises(ValueError, utils.split_path, '//c')
         self.assertRaises(ValueError, utils.split_path, '/a/c/')
@@ -980,24 +1019,24 @@ class TestUtils(unittest.TestCase):
         self.assertRaises(ValueError, utils.split_path, '/a', 2)
         self.assertRaises(ValueError, utils.split_path, '/a', 2, 3)
         self.assertRaises(ValueError, utils.split_path, '/a', 2, 3, True)
-        self.assertEquals(utils.split_path('/a/c', 2), ['a', 'c'])
-        self.assertEquals(utils.split_path('/a/c/o', 3), ['a', 'c', 'o'])
+        self.assertEqual(utils.split_path('/a/c', 2), ['a', 'c'])
+        self.assertEqual(utils.split_path('/a/c/o', 3), ['a', 'c', 'o'])
         self.assertRaises(ValueError, utils.split_path, '/a/c/o/r', 3, 3)
-        self.assertEquals(utils.split_path('/a/c/o/r', 3, 3, True),
-                          ['a', 'c', 'o/r'])
-        self.assertEquals(utils.split_path('/a/c', 2, 3, True),
-                          ['a', 'c', None])
+        self.assertEqual(utils.split_path('/a/c/o/r', 3, 3, True),
+                         ['a', 'c', 'o/r'])
+        self.assertEqual(utils.split_path('/a/c', 2, 3, True),
+                         ['a', 'c', None])
         self.assertRaises(ValueError, utils.split_path, '/a', 5, 4)
-        self.assertEquals(utils.split_path('/a/c/', 2), ['a', 'c'])
-        self.assertEquals(utils.split_path('/a/c/', 2, 3), ['a', 'c', ''])
+        self.assertEqual(utils.split_path('/a/c/', 2), ['a', 'c'])
+        self.assertEqual(utils.split_path('/a/c/', 2, 3), ['a', 'c', ''])
         try:
             utils.split_path('o\nn e', 2)
         except ValueError as err:
-            self.assertEquals(str(err), 'Invalid path: o%0An%20e')
+            self.assertEqual(str(err), 'Invalid path: o%0An%20e')
         try:
             utils.split_path('o\nn e', 2, 3, True)
         except ValueError as err:
-            self.assertEquals(str(err), 'Invalid path: o%0An%20e')
+            self.assertEqual(str(err), 'Invalid path: o%0An%20e')
 
     def test_validate_device_partition(self):
         # Test swift.common.utils.validate_device_partition
@@ -1023,18 +1062,18 @@ class TestUtils(unittest.TestCase):
         try:
             utils.validate_device_partition('o\nn e', 'foo')
         except ValueError as err:
-            self.assertEquals(str(err), 'Invalid device: o%0An%20e')
+            self.assertEqual(str(err), 'Invalid device: o%0An%20e')
         try:
             utils.validate_device_partition('foo', 'o\nn e')
         except ValueError as err:
-            self.assertEquals(str(err), 'Invalid partition: o%0An%20e')
+            self.assertEqual(str(err), 'Invalid partition: o%0An%20e')
 
     def test_NullLogger(self):
         # Test swift.common.utils.NullLogger
         sio = StringIO()
         nl = utils.NullLogger()
         nl.write('test')
-        self.assertEquals(sio.getvalue(), '')
+        self.assertEqual(sio.getvalue(), '')
 
     def test_LoggerFileObject(self):
         orig_stdout = sys.stdout
@@ -1046,35 +1085,35 @@ class TestUtils(unittest.TestCase):
         lfo_stdout = utils.LoggerFileObject(logger)
         lfo_stderr = utils.LoggerFileObject(logger)
         lfo_stderr = utils.LoggerFileObject(logger, 'STDERR')
-        print 'test1'
-        self.assertEquals(sio.getvalue(), '')
+        print('test1')
+        self.assertEqual(sio.getvalue(), '')
         sys.stdout = lfo_stdout
-        print 'test2'
-        self.assertEquals(sio.getvalue(), 'STDOUT: test2\n')
+        print('test2')
+        self.assertEqual(sio.getvalue(), 'STDOUT: test2\n')
         sys.stderr = lfo_stderr
-        print >> sys.stderr, 'test4'
-        self.assertEquals(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n')
+        print('test4', file=sys.stderr)
+        self.assertEqual(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n')
         sys.stdout = orig_stdout
-        print 'test5'
-        self.assertEquals(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n')
-        print >> sys.stderr, 'test6'
-        self.assertEquals(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n'
-                          'STDERR: test6\n')
+        print('test5')
+        self.assertEqual(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n')
+        print('test6', file=sys.stderr)
+        self.assertEqual(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n'
+                         'STDERR: test6\n')
         sys.stderr = orig_stderr
-        print 'test8'
-        self.assertEquals(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n'
-                          'STDERR: test6\n')
+        print('test8')
+        self.assertEqual(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n'
+                         'STDERR: test6\n')
         lfo_stdout.writelines(['a', 'b', 'c'])
-        self.assertEquals(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n'
-                          'STDERR: test6\nSTDOUT: a#012b#012c\n')
+        self.assertEqual(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n'
+                         'STDERR: test6\nSTDOUT: a#012b#012c\n')
         lfo_stdout.close()
         lfo_stderr.close()
         lfo_stdout.write('d')
-        self.assertEquals(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n'
-                          'STDERR: test6\nSTDOUT: a#012b#012c\nSTDOUT: d\n')
+        self.assertEqual(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n'
+                         'STDERR: test6\nSTDOUT: a#012b#012c\nSTDOUT: d\n')
         lfo_stdout.flush()
-        self.assertEquals(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n'
-                          'STDERR: test6\nSTDOUT: a#012b#012c\nSTDOUT: d\n')
+        self.assertEqual(sio.getvalue(), 'STDOUT: test2\nSTDERR: test4\n'
+                         'STDERR: test6\nSTDOUT: a#012b#012c\nSTDOUT: d\n')
         for lfo in (lfo_stdout, lfo_stderr):
             got_exc = False
             try:
@@ -1082,14 +1121,14 @@ class TestUtils(unittest.TestCase):
                     pass
             except Exception:
                 got_exc = True
-            self.assert_(got_exc)
+            self.assertTrue(got_exc)
             got_exc = False
             try:
-                for line in lfo.xreadlines():
+                for line in lfo:
                     pass
             except Exception:
                 got_exc = True
-            self.assert_(got_exc)
+            self.assertTrue(got_exc)
             self.assertRaises(IOError, lfo.read)
             self.assertRaises(IOError, lfo.read, 1024)
             self.assertRaises(IOError, lfo.readline)
@@ -1101,26 +1140,26 @@ class TestUtils(unittest.TestCase):
         with NamedTemporaryFile() as f:
             conf_file = f.name
             conf, options = utils.parse_options(test_args=[conf_file])
-            self.assertEquals(conf, conf_file)
+            self.assertEqual(conf, conf_file)
             # assert defaults
-            self.assertEquals(options['verbose'], False)
-            self.assert_('once' not in options)
+            self.assertEqual(options['verbose'], False)
+            self.assertTrue('once' not in options)
             # assert verbose as option
             conf, options = utils.parse_options(test_args=[conf_file, '-v'])
-            self.assertEquals(options['verbose'], True)
+            self.assertEqual(options['verbose'], True)
             # check once option
             conf, options = utils.parse_options(test_args=[conf_file],
                                                 once=True)
-            self.assertEquals(options['once'], False)
+            self.assertEqual(options['once'], False)
             test_args = [conf_file, '--once']
             conf, options = utils.parse_options(test_args=test_args, once=True)
-            self.assertEquals(options['once'], True)
+            self.assertEqual(options['once'], True)
             # check options as arg parsing
             test_args = [conf_file, 'once', 'plugin_name', 'verbose']
             conf, options = utils.parse_options(test_args=test_args, once=True)
-            self.assertEquals(options['verbose'], True)
-            self.assertEquals(options['once'], True)
-            self.assertEquals(options['extra_args'], ['plugin_name'])
+            self.assertEqual(options['verbose'], True)
+            self.assertEqual(options['once'], True)
+            self.assertEqual(options['extra_args'], ['plugin_name'])
 
     def test_parse_options_errors(self):
         orig_stdout = sys.stdout
@@ -1131,14 +1170,14 @@ class TestUtils(unittest.TestCase):
         utils.sys.stderr = stde
         self.assertRaises(SystemExit, utils.parse_options, once=True,
                           test_args=[])
-        self.assert_('missing config' in stdo.getvalue())
+        self.assertTrue('missing config' in stdo.getvalue())
 
         # verify conf file must exist, context manager will delete temp file
         with NamedTemporaryFile() as f:
             conf_file = f.name
         self.assertRaises(SystemExit, utils.parse_options, once=True,
                           test_args=[conf_file])
-        self.assert_('unable to locate' in stdo.getvalue())
+        self.assertTrue('unable to locate' in stdo.getvalue())
 
         # reset stdio
         utils.sys.stdout = orig_stdout
@@ -1154,7 +1193,7 @@ class TestUtils(unittest.TestCase):
             fd = open(testcache_file)
             file_dict = json.loads(fd.readline())
             fd.close()
-            self.assertEquals(submit_dict, file_dict)
+            self.assertEqual(submit_dict, file_dict)
             # Use a nested entry
             submit_dict = {'key1': {'key2': {'value1': 1, 'value2': 2}}}
             result_dict = {'key1': {'key2': {'value1': 1, 'value2': 2},
@@ -1163,7 +1202,7 @@ class TestUtils(unittest.TestCase):
             fd = open(testcache_file)
             file_dict = json.loads(fd.readline())
             fd.close()
-            self.assertEquals(result_dict, file_dict)
+            self.assertEqual(result_dict, file_dict)
         finally:
             rmtree(testdir_base)
 
@@ -1173,28 +1212,28 @@ class TestUtils(unittest.TestCase):
         logger.addHandler(logging.StreamHandler(sio))
         logger = utils.get_logger(None, 'server', log_route='server')
         logger.warn('test1')
-        self.assertEquals(sio.getvalue(), 'test1\n')
+        self.assertEqual(sio.getvalue(), 'test1\n')
         logger.debug('test2')
-        self.assertEquals(sio.getvalue(), 'test1\n')
+        self.assertEqual(sio.getvalue(), 'test1\n')
         logger = utils.get_logger({'log_level': 'DEBUG'}, 'server',
                                   log_route='server')
         logger.debug('test3')
-        self.assertEquals(sio.getvalue(), 'test1\ntest3\n')
+        self.assertEqual(sio.getvalue(), 'test1\ntest3\n')
         # Doesn't really test that the log facility is truly being used all the
         # way to syslog; but exercises the code.
         logger = utils.get_logger({'log_facility': 'LOG_LOCAL3'}, 'server',
                                   log_route='server')
         logger.warn('test4')
-        self.assertEquals(sio.getvalue(),
-                          'test1\ntest3\ntest4\n')
+        self.assertEqual(sio.getvalue(),
+                         'test1\ntest3\ntest4\n')
         # make sure debug doesn't log by default
         logger.debug('test5')
-        self.assertEquals(sio.getvalue(),
-                          'test1\ntest3\ntest4\n')
+        self.assertEqual(sio.getvalue(),
+                         'test1\ntest3\ntest4\n')
         # make sure notice lvl logs by default
         logger.notice('test6')
-        self.assertEquals(sio.getvalue(),
-                          'test1\ntest3\ntest4\ntest6\n')
+        self.assertEqual(sio.getvalue(),
+                         'test1\ntest3\ntest4\ntest6\n')
 
     def test_get_logger_sysloghandler_plumbing(self):
         orig_sysloghandler = utils.SysLogHandler
@@ -1221,14 +1260,14 @@ class TestUtils(unittest.TestCase):
                 # a fallback to UDP.
                 expected_args.append(
                     ((), {'facility': orig_sysloghandler.LOG_LOCAL3}))
-            self.assertEquals(expected_args, syslog_handler_args)
+            self.assertEqual(expected_args, syslog_handler_args)
 
             syslog_handler_args = []
             utils.get_logger({
                 'log_facility': 'LOG_LOCAL3',
                 'log_address': '/foo/bar',
             }, 'server', log_route='server')
-            self.assertEquals([
+            self.assertEqual([
                 ((), {'address': '/foo/bar',
                       'facility': orig_sysloghandler.LOG_LOCAL3}),
                 # Second call is because /foo/bar didn't exist (and wasn't a
@@ -1241,7 +1280,7 @@ class TestUtils(unittest.TestCase):
             utils.get_logger({
                 'log_udp_host': 'syslog.funtimes.com',
             }, 'server', log_route='server')
-            self.assertEquals([
+            self.assertEqual([
                 ((), {'address': ('syslog.funtimes.com',
                                   logging.handlers.SYSLOG_UDP_PORT),
                       'facility': orig_sysloghandler.LOG_LOCAL0})],
@@ -1253,7 +1292,7 @@ class TestUtils(unittest.TestCase):
                 'log_udp_host': 'syslog.funtimes.com',
                 'log_udp_port': '2123',
             }, 'server', log_route='server')
-            self.assertEquals([
+            self.assertEqual([
                 ((), {'address': ('syslog.funtimes.com', 2123),
                       'facility': orig_sysloghandler.LOG_LOCAL0})],
                 syslog_handler_args)
@@ -1280,73 +1319,73 @@ class TestUtils(unittest.TestCase):
                 logger.exception('blah')
         try:
             # establish base case
-            self.assertEquals(strip_value(sio), '')
+            self.assertEqual(strip_value(sio), '')
             logger.info('test')
-            self.assertEquals(strip_value(sio), 'test\n')
-            self.assertEquals(strip_value(sio), '')
+            self.assertEqual(strip_value(sio), 'test\n')
+            self.assertEqual(strip_value(sio), '')
             logger.info('test')
             logger.info('test')
-            self.assertEquals(strip_value(sio), 'test\ntest\n')
-            self.assertEquals(strip_value(sio), '')
+            self.assertEqual(strip_value(sio), 'test\ntest\n')
+            self.assertEqual(strip_value(sio), '')
 
             # test OSError
             for en in (errno.EIO, errno.ENOSPC):
                 log_exception(OSError(en, 'my %s error message' % en))
                 log_msg = strip_value(sio)
-                self.assert_('Traceback' not in log_msg)
-                self.assert_('my %s error message' % en in log_msg)
+                self.assertTrue('Traceback' not in log_msg)
+                self.assertTrue('my %s error message' % en in log_msg)
             # unfiltered
             log_exception(OSError())
-            self.assert_('Traceback' in strip_value(sio))
+            self.assertTrue('Traceback' in strip_value(sio))
 
             # test socket.error
             log_exception(socket.error(errno.ECONNREFUSED,
                                        'my error message'))
             log_msg = strip_value(sio)
-            self.assert_('Traceback' not in log_msg)
-            self.assert_('errno.ECONNREFUSED message test' not in log_msg)
-            self.assert_('Connection refused' in log_msg)
+            self.assertTrue('Traceback' not in log_msg)
+            self.assertTrue('errno.ECONNREFUSED message test' not in log_msg)
+            self.assertTrue('Connection refused' in log_msg)
             log_exception(socket.error(errno.EHOSTUNREACH,
                                        'my error message'))
             log_msg = strip_value(sio)
-            self.assert_('Traceback' not in log_msg)
-            self.assert_('my error message' not in log_msg)
-            self.assert_('Host unreachable' in log_msg)
+            self.assertTrue('Traceback' not in log_msg)
+            self.assertTrue('my error message' not in log_msg)
+            self.assertTrue('Host unreachable' in log_msg)
             log_exception(socket.error(errno.ETIMEDOUT, 'my error message'))
             log_msg = strip_value(sio)
-            self.assert_('Traceback' not in log_msg)
-            self.assert_('my error message' not in log_msg)
-            self.assert_('Connection timeout' in log_msg)
+            self.assertTrue('Traceback' not in log_msg)
+            self.assertTrue('my error message' not in log_msg)
+            self.assertTrue('Connection timeout' in log_msg)
             # unfiltered
             log_exception(socket.error(0, 'my error message'))
             log_msg = strip_value(sio)
-            self.assert_('Traceback' in log_msg)
-            self.assert_('my error message' in log_msg)
+            self.assertTrue('Traceback' in log_msg)
+            self.assertTrue('my error message' in log_msg)
 
             # test eventlet.Timeout
             connection_timeout = ConnectionTimeout(42, 'my error message')
             log_exception(connection_timeout)
             log_msg = strip_value(sio)
-            self.assert_('Traceback' not in log_msg)
-            self.assert_('ConnectionTimeout' in log_msg)
-            self.assert_('(42s)' in log_msg)
-            self.assert_('my error message' not in log_msg)
+            self.assertTrue('Traceback' not in log_msg)
+            self.assertTrue('ConnectionTimeout' in log_msg)
+            self.assertTrue('(42s)' in log_msg)
+            self.assertTrue('my error message' not in log_msg)
             connection_timeout.cancel()
 
             message_timeout = MessageTimeout(42, 'my error message')
             log_exception(message_timeout)
             log_msg = strip_value(sio)
-            self.assert_('Traceback' not in log_msg)
-            self.assert_('MessageTimeout' in log_msg)
-            self.assert_('(42s)' in log_msg)
-            self.assert_('my error message' in log_msg)
+            self.assertTrue('Traceback' not in log_msg)
+            self.assertTrue('MessageTimeout' in log_msg)
+            self.assertTrue('(42s)' in log_msg)
+            self.assertTrue('my error message' in log_msg)
             message_timeout.cancel()
 
             # test unhandled
             log_exception(Exception('my error message'))
             log_msg = strip_value(sio)
-            self.assert_('Traceback' in log_msg)
-            self.assert_('my error message' in log_msg)
+            self.assertTrue('Traceback' in log_msg)
+            self.assertTrue('my error message' in log_msg)
 
         finally:
             logger.logger.removeHandler(handler)
@@ -1424,55 +1463,55 @@ class TestUtils(unittest.TestCase):
             self.assertFalse(logger.txn_id)
             logger.error('my error message')
             log_msg = strip_value(sio)
-            self.assert_('my error message' in log_msg)
-            self.assert_('txn' not in log_msg)
+            self.assertTrue('my error message' in log_msg)
+            self.assertTrue('txn' not in log_msg)
             logger.txn_id = '12345'
             logger.error('test')
             log_msg = strip_value(sio)
-            self.assert_('txn' in log_msg)
-            self.assert_('12345' in log_msg)
+            self.assertTrue('txn' in log_msg)
+            self.assertTrue('12345' in log_msg)
             # test no txn on info message
-            self.assertEquals(logger.txn_id, '12345')
+            self.assertEqual(logger.txn_id, '12345')
             logger.info('test')
             log_msg = strip_value(sio)
-            self.assert_('txn' not in log_msg)
-            self.assert_('12345' not in log_msg)
+            self.assertTrue('txn' not in log_msg)
+            self.assertTrue('12345' not in log_msg)
             # test txn already in message
-            self.assertEquals(logger.txn_id, '12345')
+            self.assertEqual(logger.txn_id, '12345')
             logger.warn('test 12345 test')
-            self.assertEquals(strip_value(sio), 'test 12345 test\n')
+            self.assertEqual(strip_value(sio), 'test 12345 test\n')
             # Test multi line collapsing
             logger.error('my\nerror\nmessage')
             log_msg = strip_value(sio)
-            self.assert_('my#012error#012message' in log_msg)
+            self.assertTrue('my#012error#012message' in log_msg)
 
             # test client_ip
             self.assertFalse(logger.client_ip)
             logger.error('my error message')
             log_msg = strip_value(sio)
-            self.assert_('my error message' in log_msg)
-            self.assert_('client_ip' not in log_msg)
+            self.assertTrue('my error message' in log_msg)
+            self.assertTrue('client_ip' not in log_msg)
             logger.client_ip = '1.2.3.4'
             logger.error('test')
             log_msg = strip_value(sio)
-            self.assert_('client_ip' in log_msg)
-            self.assert_('1.2.3.4' in log_msg)
+            self.assertTrue('client_ip' in log_msg)
+            self.assertTrue('1.2.3.4' in log_msg)
             # test no client_ip on info message
-            self.assertEquals(logger.client_ip, '1.2.3.4')
+            self.assertEqual(logger.client_ip, '1.2.3.4')
             logger.info('test')
             log_msg = strip_value(sio)
-            self.assert_('client_ip' not in log_msg)
-            self.assert_('1.2.3.4' not in log_msg)
+            self.assertTrue('client_ip' not in log_msg)
+            self.assertTrue('1.2.3.4' not in log_msg)
             # test client_ip (and txn) already in message
-            self.assertEquals(logger.client_ip, '1.2.3.4')
+            self.assertEqual(logger.client_ip, '1.2.3.4')
             logger.warn('test 1.2.3.4 test 12345')
-            self.assertEquals(strip_value(sio), 'test 1.2.3.4 test 12345\n')
+            self.assertEqual(strip_value(sio), 'test 1.2.3.4 test 12345\n')
         finally:
             logger.logger.removeHandler(handler)
 
     def test_storage_directory(self):
-        self.assertEquals(utils.storage_directory('objects', '1', 'ABCDEF'),
-                          'objects/1/DEF/ABCDEF')
+        self.assertEqual(utils.storage_directory('objects', '1', 'ABCDEF'),
+                         'objects/1/DEF/ABCDEF')
 
     def test_expand_ipv6(self):
         expanded_ipv6 = "fe80::204:61ff:fe9d:f156"
@@ -1485,8 +1524,20 @@ class TestUtils(unittest.TestCase):
 
     def test_whataremyips(self):
         myips = utils.whataremyips()
-        self.assert_(len(myips) > 1)
-        self.assert_('127.0.0.1' in myips)
+        self.assertTrue(len(myips) > 1)
+        self.assertTrue('127.0.0.1' in myips)
+
+    def test_whataremyips_bind_to_all(self):
+        for any_addr in ('0.0.0.0', '0000:0000:0000:0000:0000:0000:0000:0000',
+                         '::0', '::0000', '::',
+                         # Wacky parse-error input produces all IPs
+                         'I am a bear'):
+            myips = utils.whataremyips(any_addr)
+            self.assertTrue(len(myips) > 1)
+            self.assertTrue('127.0.0.1' in myips)
+
+    def test_whataremyips_bind_ip_specific(self):
+        self.assertEqual(['1.2.3.4'], utils.whataremyips('1.2.3.4'))
 
     def test_whataremyips_error(self):
         def my_interfaces():
@@ -1495,10 +1546,9 @@ class TestUtils(unittest.TestCase):
         def my_ifaddress_error(interface):
             raise ValueError
 
-        with nested(
-                patch('netifaces.interfaces', my_interfaces),
-                patch('netifaces.ifaddresses', my_ifaddress_error)):
-            self.assertEquals(utils.whataremyips(), [])
+        with patch('netifaces.interfaces', my_interfaces), \
+                patch('netifaces.ifaddresses', my_ifaddress_error):
+            self.assertEqual(utils.whataremyips(), [])
 
     def test_whataremyips_ipv6(self):
         test_ipv6_address = '2001:6b0:dead:beef:2::32'
@@ -1511,41 +1561,90 @@ class TestUtils(unittest.TestCase):
             return {AF_INET6:
                     [{'netmask': 'ffff:ffff:ffff:ffff::',
                       'addr': '%s%%%s' % (test_ipv6_address, test_interface)}]}
-        with nested(
-                patch('netifaces.interfaces', my_ipv6_interfaces),
-                patch('netifaces.ifaddresses', my_ipv6_ifaddresses)):
+        with patch('netifaces.interfaces', my_ipv6_interfaces), \
+                patch('netifaces.ifaddresses', my_ipv6_ifaddresses):
             myips = utils.whataremyips()
-            self.assertEquals(len(myips), 1)
-            self.assertEquals(myips[0], test_ipv6_address)
+            self.assertEqual(len(myips), 1)
+            self.assertEqual(myips[0], test_ipv6_address)
 
     def test_hash_path(self):
-        _prefix = utils.HASH_PATH_PREFIX
-        utils.HASH_PATH_PREFIX = ''
         # Yes, these tests are deliberately very fragile. We want to make sure
         # that if someones changes the results hash_path produces, they know it
-        try:
-            self.assertEquals(utils.hash_path('a'),
-                              '1c84525acb02107ea475dcd3d09c2c58')
-            self.assertEquals(utils.hash_path('a', 'c'),
-                              '33379ecb053aa5c9e356c68997cbb59e')
-            self.assertEquals(utils.hash_path('a', 'c', 'o'),
-                              '06fbf0b514e5199dfc4e00f42eb5ea83')
-            self.assertEquals(utils.hash_path('a', 'c', 'o', raw_digest=False),
-                              '06fbf0b514e5199dfc4e00f42eb5ea83')
-            self.assertEquals(utils.hash_path('a', 'c', 'o', raw_digest=True),
-                              '\x06\xfb\xf0\xb5\x14\xe5\x19\x9d\xfcN'
-                              '\x00\xf4.\xb5\xea\x83')
+        with mock.patch('swift.common.utils.HASH_PATH_PREFIX', ''):
+            self.assertEqual(utils.hash_path('a'),
+                             '1c84525acb02107ea475dcd3d09c2c58')
+            self.assertEqual(utils.hash_path('a', 'c'),
+                             '33379ecb053aa5c9e356c68997cbb59e')
+            self.assertEqual(utils.hash_path('a', 'c', 'o'),
+                             '06fbf0b514e5199dfc4e00f42eb5ea83')
+            self.assertEqual(utils.hash_path('a', 'c', 'o', raw_digest=False),
+                             '06fbf0b514e5199dfc4e00f42eb5ea83')
+            self.assertEqual(utils.hash_path('a', 'c', 'o', raw_digest=True),
+                             '\x06\xfb\xf0\xb5\x14\xe5\x19\x9d\xfcN'
+                             '\x00\xf4.\xb5\xea\x83')
             self.assertRaises(ValueError, utils.hash_path, 'a', object='o')
             utils.HASH_PATH_PREFIX = 'abcdef'
-            self.assertEquals(utils.hash_path('a', 'c', 'o', raw_digest=False),
-                              '363f9b535bfb7d17a43a46a358afca0e')
-        finally:
-            utils.HASH_PATH_PREFIX = _prefix
+            self.assertEqual(utils.hash_path('a', 'c', 'o', raw_digest=False),
+                             '363f9b535bfb7d17a43a46a358afca0e')
+
+    def test_validate_hash_conf(self):
+        # no section causes InvalidHashPathConfigError
+        self._test_validate_hash_conf([], [], True)
+
+        # 'swift-hash' section is there but no options causes
+        # InvalidHashPathConfigError
+        self._test_validate_hash_conf(['swift-hash'], [], True)
+
+        # if we have the section and either of prefix or suffix,
+        # InvalidHashPathConfigError doesn't occur
+        self._test_validate_hash_conf(
+            ['swift-hash'], ['swift_hash_path_prefix'], False)
+        self._test_validate_hash_conf(
+            ['swift-hash'], ['swift_hash_path_suffix'], False)
+
+        # definitely, we have the section and both of them,
+        # InvalidHashPathConfigError doesn't occur
+        self._test_validate_hash_conf(
+            ['swift-hash'],
+            ['swift_hash_path_suffix', 'swift_hash_path_prefix'], False)
+
+        # But invalid section name should make an error even if valid
+        # options are there
+        self._test_validate_hash_conf(
+            ['swift-hash-xxx'],
+            ['swift_hash_path_suffix', 'swift_hash_path_prefix'], True)
+
+    def _test_validate_hash_conf(self, sections, options, should_raise_error):
+
+        class FakeConfigParser(object):
+            def read(self, conf_path):
+                return True
+
+            def get(self, section, option):
+                if section not in sections:
+                    raise NoSectionError('section error')
+                elif option not in options:
+                    raise NoOptionError('option error', 'this option')
+                else:
+                    return 'some_option_value'
+
+        with mock.patch('swift.common.utils.HASH_PATH_PREFIX', ''), \
+                mock.patch('swift.common.utils.HASH_PATH_SUFFIX', ''), \
+                mock.patch('swift.common.utils.ConfigParser',
+                           FakeConfigParser):
+            try:
+                utils.validate_hash_conf()
+            except utils.InvalidHashPathConfigError:
+                if not should_raise_error:
+                    self.fail('validate_hash_conf should not raise an error')
+            else:
+                if should_raise_error:
+                    self.fail('validate_hash_conf should raise an error')
 
     def test_load_libc_function(self):
-        self.assert_(callable(
+        self.assertTrue(callable(
             utils.load_libc_function('printf')))
-        self.assert_(callable(
+        self.assertTrue(callable(
             utils.load_libc_function('some_not_real_function')))
         self.assertRaises(AttributeError,
                           utils.load_libc_function, 'some_not_real_function',
@@ -1571,28 +1670,28 @@ log_name = yarr'''
                         'log_name': None,
                         'section1': {'foo': 'bar'},
                         'section2': {'log_name': 'yarr'}}
-            self.assertEquals(result, expected)
+            self.assertEqual(result, expected)
             conffile = conf_object_maker()
             result = utils.readconf(conffile, 'section1')
             expected = {'__file__': conffile, 'log_name': 'section1',
                         'foo': 'bar'}
-            self.assertEquals(result, expected)
+            self.assertEqual(result, expected)
             conffile = conf_object_maker()
             result = utils.readconf(conffile,
                                     'section2').get('log_name')
             expected = 'yarr'
-            self.assertEquals(result, expected)
+            self.assertEqual(result, expected)
             conffile = conf_object_maker()
             result = utils.readconf(conffile, 'section1',
                                     log_name='foo').get('log_name')
             expected = 'foo'
-            self.assertEquals(result, expected)
+            self.assertEqual(result, expected)
             conffile = conf_object_maker()
             result = utils.readconf(conffile, 'section1',
                                     defaults={'bar': 'baz'})
             expected = {'__file__': conffile, 'log_name': 'section1',
                         'foo': 'bar', 'bar': 'baz'}
-            self.assertEquals(result, expected)
+            self.assertEqual(result, expected)
         self.assertRaises(SystemExit, utils.readconf, temppath, 'section3')
         os.unlink(temppath)
         self.assertRaises(SystemExit, utils.readconf, temppath)
@@ -1617,7 +1716,7 @@ log_name = %(yarr)s'''
                         'log_name': None,
                         'section1': {'foo': 'bar'},
                         'section2': {'log_name': '%(yarr)s'}}
-            self.assertEquals(result, expected)
+            self.assertEqual(result, expected)
         os.unlink(temppath)
         self.assertRaises(SystemExit, utils.readconf, temppath)
 
@@ -1668,7 +1767,7 @@ log_name = %(yarr)s'''
                 'name': 'section2',
             },
         }
-        self.assertEquals(conf, expected)
+        self.assertEqual(conf, expected)
 
     def test_readconf_dir_ignores_hidden_and_nondotconf_files(self):
         config_dir = {
@@ -1697,7 +1796,7 @@ log_name = %(yarr)s'''
                 'port': '8080',
             },
         }
-        self.assertEquals(conf, expected)
+        self.assertEqual(conf, expected)
 
     def test_drop_privileges(self):
         user = getuser()
@@ -1708,13 +1807,13 @@ log_name = %(yarr)s'''
         # exercise the code
         utils.drop_privileges(user)
         for func in required_func_calls:
-            self.assert_(utils.os.called_funcs[func])
+            self.assertTrue(utils.os.called_funcs[func])
         import pwd
-        self.assertEquals(pwd.getpwnam(user)[5], utils.os.environ['HOME'])
+        self.assertEqual(pwd.getpwnam(user)[5], utils.os.environ['HOME'])
 
         groups = [g.gr_gid for g in grp.getgrall() if user in g.gr_mem]
         groups.append(pwd.getpwnam(user).pw_gid)
-        self.assertEquals(set(groups), set(os.getgroups()))
+        self.assertEqual(set(groups), set(os.getgroups()))
 
         # reset; test same args, OSError trying to get session leader
         utils.os = MockOs(called_funcs=required_func_calls,
@@ -1723,7 +1822,22 @@ log_name = %(yarr)s'''
             self.assertFalse(utils.os.called_funcs.get(func, False))
         utils.drop_privileges(user)
         for func in required_func_calls:
-            self.assert_(utils.os.called_funcs[func])
+            self.assertTrue(utils.os.called_funcs[func])
+
+    def test_drop_privileges_no_call_setsid(self):
+        user = getuser()
+        # over-ride os with mock
+        required_func_calls = ('setgroups', 'setgid', 'setuid', 'chdir',
+                               'umask')
+        bad_func_calls = ('setsid',)
+        utils.os = MockOs(called_funcs=required_func_calls,
+                          raise_funcs=bad_func_calls)
+        # exercise the code
+        utils.drop_privileges(user, call_setsid=False)
+        for func in required_func_calls:
+            self.assertTrue(utils.os.called_funcs[func])
+        for func in bad_func_calls:
+            self.assertTrue(func not in utils.os.called_funcs)
 
     @reset_logger_state
     def test_capture_stdio(self):
@@ -1739,10 +1853,12 @@ log_name = %(yarr)s'''
 
             # basic test
             utils.capture_stdio(logger)
-            self.assert_(utils.sys.excepthook is not None)
-            self.assertEquals(utils.os.closed_fds, utils.sys.stdio_fds)
-            self.assert_(isinstance(utils.sys.stdout, utils.LoggerFileObject))
-            self.assert_(isinstance(utils.sys.stderr, utils.LoggerFileObject))
+            self.assertTrue(utils.sys.excepthook is not None)
+            self.assertEqual(utils.os.closed_fds, utils.sys.stdio_fds)
+            self.assertTrue(
+                isinstance(utils.sys.stdout, utils.LoggerFileObject))
+            self.assertTrue(
+                isinstance(utils.sys.stderr, utils.LoggerFileObject))
 
             # reset; test same args, but exc when trying to close stdio
             utils.os = MockOs(raise_funcs=('dup2',))
@@ -1750,10 +1866,12 @@ log_name = %(yarr)s'''
 
             # test unable to close stdio
             utils.capture_stdio(logger)
-            self.assert_(utils.sys.excepthook is not None)
-            self.assertEquals(utils.os.closed_fds, [])
-            self.assert_(isinstance(utils.sys.stdout, utils.LoggerFileObject))
-            self.assert_(isinstance(utils.sys.stderr, utils.LoggerFileObject))
+            self.assertTrue(utils.sys.excepthook is not None)
+            self.assertEqual(utils.os.closed_fds, [])
+            self.assertTrue(
+                isinstance(utils.sys.stdout, utils.LoggerFileObject))
+            self.assertTrue(
+                isinstance(utils.sys.stderr, utils.LoggerFileObject))
 
             # reset; test some other args
             utils.os = MockOs()
@@ -1763,9 +1881,9 @@ log_name = %(yarr)s'''
             # test console log
             utils.capture_stdio(logger, capture_stdout=False,
                                 capture_stderr=False)
-            self.assert_(utils.sys.excepthook is not None)
+            self.assertTrue(utils.sys.excepthook is not None)
             # when logging to console, stderr remains open
-            self.assertEquals(utils.os.closed_fds, utils.sys.stdio_fds[:2])
+            self.assertEqual(utils.os.closed_fds, utils.sys.stdio_fds[:2])
             reset_loggers()
 
             # stdio not captured
@@ -1786,16 +1904,16 @@ log_name = %(yarr)s'''
         logger = utils.get_logger(None, log_to_console=True)
         console_handlers = [h for h in logger.logger.handlers if
                             isinstance(h, logging.StreamHandler)]
-        self.assert_(console_handlers)
+        self.assertTrue(console_handlers)
         # make sure you can't have two console handlers
-        self.assertEquals(len(console_handlers), 1)
+        self.assertEqual(len(console_handlers), 1)
         old_handler = console_handlers[0]
         logger = utils.get_logger(None, log_to_console=True)
         console_handlers = [h for h in logger.logger.handlers if
                             isinstance(h, logging.StreamHandler)]
-        self.assertEquals(len(console_handlers), 1)
+        self.assertEqual(len(console_handlers), 1)
         new_handler = console_handlers[0]
-        self.assertNotEquals(new_handler, old_handler)
+        self.assertNotEqual(new_handler, old_handler)
 
     def verify_under_pseudo_time(
             self, func, target_runtime_ms=1, *args, **kwargs):
@@ -1809,10 +1927,9 @@ log_name = %(yarr)s'''
             curr_time[0] += 0.001
             curr_time[0] += duration
 
-        with nested(
-                patch('time.time', my_time),
-                patch('time.sleep', my_sleep),
-                patch('eventlet.sleep', my_sleep)):
+        with patch('time.time', my_time), \
+                patch('time.sleep', my_sleep), \
+                patch('eventlet.sleep', my_sleep):
             start = time.time()
             func(*args, **kwargs)
             # make sure it's accurate to 10th of a second, converting the time
@@ -1856,7 +1973,7 @@ log_name = %(yarr)s'''
                 running_time = utils.ratelimit_sleep(running_time,
                                                      500, incr_by=i)
                 total += i
-            self.assertEquals(248, total)
+            self.assertEqual(248, total)
 
         self.verify_under_pseudo_time(testfunc, target_runtime_ms=500)
 
@@ -1874,42 +1991,42 @@ log_name = %(yarr)s'''
 
     def test_urlparse(self):
         parsed = utils.urlparse('http://127.0.0.1/')
-        self.assertEquals(parsed.scheme, 'http')
-        self.assertEquals(parsed.hostname, '127.0.0.1')
-        self.assertEquals(parsed.path, '/')
+        self.assertEqual(parsed.scheme, 'http')
+        self.assertEqual(parsed.hostname, '127.0.0.1')
+        self.assertEqual(parsed.path, '/')
 
         parsed = utils.urlparse('http://127.0.0.1:8080/')
-        self.assertEquals(parsed.port, 8080)
+        self.assertEqual(parsed.port, 8080)
 
         parsed = utils.urlparse('https://127.0.0.1/')
-        self.assertEquals(parsed.scheme, 'https')
+        self.assertEqual(parsed.scheme, 'https')
 
         parsed = utils.urlparse('http://[::1]/')
-        self.assertEquals(parsed.hostname, '::1')
+        self.assertEqual(parsed.hostname, '::1')
 
         parsed = utils.urlparse('http://[::1]:8080/')
-        self.assertEquals(parsed.hostname, '::1')
-        self.assertEquals(parsed.port, 8080)
+        self.assertEqual(parsed.hostname, '::1')
+        self.assertEqual(parsed.port, 8080)
 
         parsed = utils.urlparse('www.example.com')
-        self.assertEquals(parsed.hostname, '')
+        self.assertEqual(parsed.hostname, '')
 
     def test_search_tree(self):
         # file match & ext miss
         with temptree(['asdf.conf', 'blarg.conf', 'asdf.cfg']) as t:
             asdf = utils.search_tree(t, 'a*', '.conf')
-            self.assertEquals(len(asdf), 1)
-            self.assertEquals(asdf[0],
-                              os.path.join(t, 'asdf.conf'))
+            self.assertEqual(len(asdf), 1)
+            self.assertEqual(asdf[0],
+                             os.path.join(t, 'asdf.conf'))
 
         # multi-file match & glob miss & sort
         with temptree(['application.bin', 'apple.bin', 'apropos.bin']) as t:
             app_bins = utils.search_tree(t, 'app*', 'bin')
-            self.assertEquals(len(app_bins), 2)
-            self.assertEquals(app_bins[0],
-                              os.path.join(t, 'apple.bin'))
-            self.assertEquals(app_bins[1],
-                              os.path.join(t, 'application.bin'))
+            self.assertEqual(len(app_bins), 2)
+            self.assertEqual(app_bins[0],
+                             os.path.join(t, 'apple.bin'))
+            self.assertEqual(app_bins[1],
+                             os.path.join(t, 'application.bin'))
 
         # test file in folder & ext miss & glob miss
         files = (
@@ -1921,9 +2038,9 @@ log_name = %(yarr)s'''
         )
         with temptree(files) as t:
             sub_ini = utils.search_tree(t, 'sub*', '.ini')
-            self.assertEquals(len(sub_ini), 1)
-            self.assertEquals(sub_ini[0],
-                              os.path.join(t, 'sub/file1.ini'))
+            self.assertEqual(len(sub_ini), 1)
+            self.assertEqual(sub_ini[0],
+                             os.path.join(t, 'sub/file1.ini'))
 
         # test multi-file in folder & sub-folder & ext miss & glob miss
         files = (
@@ -1936,13 +2053,13 @@ log_name = %(yarr)s'''
         )
         with temptree(files) as t:
             folder_texts = utils.search_tree(t, 'folder*', '.txt')
-            self.assertEquals(len(folder_texts), 4)
+            self.assertEqual(len(folder_texts), 4)
             f1 = os.path.join(t, 'folder_file.txt')
             f2 = os.path.join(t, 'folder/1.txt')
             f3 = os.path.join(t, 'folder/sub/2.txt')
             f4 = os.path.join(t, 'folder2/3.txt')
             for f in [f1, f2, f3, f4]:
-                self.assert_(f in folder_texts)
+                self.assertTrue(f in folder_texts)
 
     def test_search_tree_with_directory_ext_match(self):
         files = (
@@ -1959,10 +2076,10 @@ log_name = %(yarr)s'''
         with temptree(files) as t:
             conf_dirs = utils.search_tree(t, 'object-server', '.conf',
                                           dir_ext='conf.d')
-        self.assertEquals(len(conf_dirs), 4)
+        self.assertEqual(len(conf_dirs), 4)
         for i in range(4):
             conf_dir = os.path.join(t, 'object-server/%d.conf.d' % (i + 1))
-            self.assert_(conf_dir in conf_dirs)
+            self.assertTrue(conf_dir in conf_dirs)
 
     def test_search_tree_conf_dir_with_named_conf_match(self):
         files = (
@@ -1974,7 +2091,7 @@ log_name = %(yarr)s'''
         with temptree(files) as t:
             conf_dirs = utils.search_tree(t, 'proxy-server', 'noauth.conf',
                                           dir_ext='noauth.conf.d')
-        self.assertEquals(len(conf_dirs), 1)
+        self.assertEqual(len(conf_dirs), 1)
         conf_dir = conf_dirs[0]
         expected = os.path.join(t, 'proxy-server/proxy-noauth.conf.d')
         self.assertEqual(conf_dir, expected)
@@ -1987,7 +2104,7 @@ log_name = %(yarr)s'''
         with temptree(files) as t:
             pid_files = utils.search_tree(t, 'proxy-server',
                                           exts=['noauth.pid', 'noauth.pid.d'])
-        self.assertEquals(len(pid_files), 1)
+        self.assertEqual(len(pid_files), 1)
         pid_file = pid_files[0]
         expected = os.path.join(t, 'proxy-server/proxy-noauth.pid.d')
         self.assertEqual(pid_file, expected)
@@ -1998,13 +2115,13 @@ log_name = %(yarr)s'''
             utils.write_file(file_name, 'test')
             with open(file_name, 'r') as f:
                 contents = f.read()
-            self.assertEquals(contents, 'test')
+            self.assertEqual(contents, 'test')
             # and also subdirs
             file_name = os.path.join(t, 'subdir/test2')
             utils.write_file(file_name, 'test2')
             with open(file_name, 'r') as f:
                 contents = f.read()
-            self.assertEquals(contents, 'test2')
+            self.assertEqual(contents, 'test2')
             # but can't over-write files
             file_name = os.path.join(t, 'subdir/test2/test3')
             self.assertRaises(IOError, utils.write_file, file_name,
@@ -2014,36 +2131,36 @@ log_name = %(yarr)s'''
         with temptree([]) as t:
             file_name = os.path.join(t, 'blah.pid')
             # assert no raise
-            self.assertEquals(os.path.exists(file_name), False)
-            self.assertEquals(utils.remove_file(file_name), None)
+            self.assertEqual(os.path.exists(file_name), False)
+            self.assertEqual(utils.remove_file(file_name), None)
             with open(file_name, 'w') as f:
                 f.write('1')
-            self.assert_(os.path.exists(file_name))
-            self.assertEquals(utils.remove_file(file_name), None)
+            self.assertTrue(os.path.exists(file_name))
+            self.assertEqual(utils.remove_file(file_name), None)
             self.assertFalse(os.path.exists(file_name))
 
     def test_human_readable(self):
-        self.assertEquals(utils.human_readable(0), '0')
-        self.assertEquals(utils.human_readable(1), '1')
-        self.assertEquals(utils.human_readable(10), '10')
-        self.assertEquals(utils.human_readable(100), '100')
-        self.assertEquals(utils.human_readable(999), '999')
-        self.assertEquals(utils.human_readable(1024), '1Ki')
-        self.assertEquals(utils.human_readable(1535), '1Ki')
-        self.assertEquals(utils.human_readable(1536), '2Ki')
-        self.assertEquals(utils.human_readable(1047552), '1023Ki')
-        self.assertEquals(utils.human_readable(1048063), '1023Ki')
-        self.assertEquals(utils.human_readable(1048064), '1Mi')
-        self.assertEquals(utils.human_readable(1048576), '1Mi')
-        self.assertEquals(utils.human_readable(1073741824), '1Gi')
-        self.assertEquals(utils.human_readable(1099511627776), '1Ti')
-        self.assertEquals(utils.human_readable(1125899906842624), '1Pi')
-        self.assertEquals(utils.human_readable(1152921504606846976), '1Ei')
-        self.assertEquals(utils.human_readable(1180591620717411303424), '1Zi')
-        self.assertEquals(utils.human_readable(1208925819614629174706176),
-                          '1Yi')
-        self.assertEquals(utils.human_readable(1237940039285380274899124224),
-                          '1024Yi')
+        self.assertEqual(utils.human_readable(0), '0')
+        self.assertEqual(utils.human_readable(1), '1')
+        self.assertEqual(utils.human_readable(10), '10')
+        self.assertEqual(utils.human_readable(100), '100')
+        self.assertEqual(utils.human_readable(999), '999')
+        self.assertEqual(utils.human_readable(1024), '1Ki')
+        self.assertEqual(utils.human_readable(1535), '1Ki')
+        self.assertEqual(utils.human_readable(1536), '2Ki')
+        self.assertEqual(utils.human_readable(1047552), '1023Ki')
+        self.assertEqual(utils.human_readable(1048063), '1023Ki')
+        self.assertEqual(utils.human_readable(1048064), '1Mi')
+        self.assertEqual(utils.human_readable(1048576), '1Mi')
+        self.assertEqual(utils.human_readable(1073741824), '1Gi')
+        self.assertEqual(utils.human_readable(1099511627776), '1Ti')
+        self.assertEqual(utils.human_readable(1125899906842624), '1Pi')
+        self.assertEqual(utils.human_readable(1152921504606846976), '1Ei')
+        self.assertEqual(utils.human_readable(1180591620717411303424), '1Zi')
+        self.assertEqual(utils.human_readable(1208925819614629174706176),
+                         '1Yi')
+        self.assertEqual(utils.human_readable(1237940039285380274899124224),
+                         '1024Yi')
 
     def test_validate_sync_to(self):
         fname = 'container-sync-realms.conf'
@@ -2080,12 +2197,12 @@ cluster_dfw1 = http://dfw1.host/v1/
                         ('',
                          (None, None, None, None))):
                     if goodurl.startswith('//') and not realms_conf:
-                        self.assertEquals(
+                        self.assertEqual(
                             utils.validate_sync_to(
                                 goodurl, ['1.1.1.1', '2.2.2.2'], realms_conf),
                             (None, None, None, None))
                     else:
-                        self.assertEquals(
+                        self.assertEqual(
                             utils.validate_sync_to(
                                 goodurl, ['1.1.1.1', '2.2.2.2'], realms_conf),
                             result)
@@ -2139,19 +2256,19 @@ cluster_dfw1 = http://dfw1.host/v1/
                          ("Invalid X-Container-Sync-To format "
                           "'//us'", None, None, None))):
                     if badurl.startswith('//') and not realms_conf:
-                        self.assertEquals(
+                        self.assertEqual(
                             utils.validate_sync_to(
                                 badurl, ['1.1.1.1', '2.2.2.2'], realms_conf),
                             (None, None, None, None))
                     else:
-                        self.assertEquals(
+                        self.assertEqual(
                             utils.validate_sync_to(
                                 badurl, ['1.1.1.1', '2.2.2.2'], realms_conf),
                             result)
 
     def test_TRUE_VALUES(self):
         for v in utils.TRUE_VALUES:
-            self.assertEquals(v, v.lower())
+            self.assertEqual(v, v.lower())
 
     def test_config_true_value(self):
         orig_trues = utils.TRUE_VALUES
@@ -2183,7 +2300,7 @@ cluster_dfw1 = http://dfw1.host/v1/
                 if e.__class__ is not expected:
                     raise
             else:
-                self.assertEquals(expected, rv)
+                self.assertEqual(expected, rv)
 
     def test_streq_const_time(self):
         self.assertTrue(utils.streq_const_time('abc123', 'abc123'))
@@ -2212,6 +2329,58 @@ cluster_dfw1 = http://dfw1.host/v1/
         self.assertEqual(
             utils.rsync_ip('::ffff:192.0.2.128'), '[::ffff:192.0.2.128]')
 
+    def test_rsync_module_interpolation(self):
+        fake_device = {'ip': '127.0.0.1', 'port': 11,
+                       'replication_ip': '127.0.0.2', 'replication_port': 12,
+                       'region': '1', 'zone': '2', 'device': 'sda1',
+                       'meta': 'just_a_string'}
+
+        self.assertEqual(
+            utils.rsync_module_interpolation('{ip}', fake_device),
+            '127.0.0.1')
+        self.assertEqual(
+            utils.rsync_module_interpolation('{port}', fake_device),
+            '11')
+        self.assertEqual(
+            utils.rsync_module_interpolation('{replication_ip}', fake_device),
+            '127.0.0.2')
+        self.assertEqual(
+            utils.rsync_module_interpolation('{replication_port}',
+                                             fake_device),
+            '12')
+        self.assertEqual(
+            utils.rsync_module_interpolation('{region}', fake_device),
+            '1')
+        self.assertEqual(
+            utils.rsync_module_interpolation('{zone}', fake_device),
+            '2')
+        self.assertEqual(
+            utils.rsync_module_interpolation('{device}', fake_device),
+            'sda1')
+        self.assertEqual(
+            utils.rsync_module_interpolation('{meta}', fake_device),
+            'just_a_string')
+
+        self.assertEqual(
+            utils.rsync_module_interpolation('{replication_ip}::object',
+                                             fake_device),
+            '127.0.0.2::object')
+        self.assertEqual(
+            utils.rsync_module_interpolation('{ip}::container{port}',
+                                             fake_device),
+            '127.0.0.1::container11')
+        self.assertEqual(
+            utils.rsync_module_interpolation(
+                '{replication_ip}::object_{device}', fake_device),
+            '127.0.0.2::object_sda1')
+        self.assertEqual(
+            utils.rsync_module_interpolation(
+                '127.0.0.3::object_{replication_port}', fake_device),
+            '127.0.0.3::object_12')
+
+        self.assertRaises(ValueError, utils.rsync_module_interpolation,
+                          '{replication_ip}::object_{deivce}', fake_device)
+
     def test_fallocate_reserve(self):
 
         class StatVFS(object):
@@ -2230,12 +2399,12 @@ cluster_dfw1 = http://dfw1.host/v1/
             utils.FALLOCATE_RESERVE = 1023
             StatVFS.f_frsize = 1024
             StatVFS.f_bavail = 1
-            self.assertEquals(fallocate(0, 1, 0, ctypes.c_uint64(0)), 0)
+            self.assertEqual(fallocate(0, 1, 0, ctypes.c_uint64(0)), 0)
             # Want 1023 reserved, have 512 * 2 free, so succeeds
             utils.FALLOCATE_RESERVE = 1023
             StatVFS.f_frsize = 512
             StatVFS.f_bavail = 2
-            self.assertEquals(fallocate(0, 1, 0, ctypes.c_uint64(0)), 0)
+            self.assertEqual(fallocate(0, 1, 0, ctypes.c_uint64(0)), 0)
             # Want 1024 reserved, have 1024 * 1 free, so fails
             utils.FALLOCATE_RESERVE = 1024
             StatVFS.f_frsize = 1024
@@ -2245,7 +2414,7 @@ cluster_dfw1 = http://dfw1.host/v1/
                 fallocate(0, 1, 0, ctypes.c_uint64(0))
             except OSError as err:
                 exc = err
-            self.assertEquals(str(exc), 'FALLOCATE_RESERVE fail 1024 <= 1024')
+            self.assertEqual(str(exc), 'FALLOCATE_RESERVE fail 1024 <= 1024')
             # Want 1024 reserved, have 512 * 2 free, so fails
             utils.FALLOCATE_RESERVE = 1024
             StatVFS.f_frsize = 512
@@ -2255,7 +2424,7 @@ cluster_dfw1 = http://dfw1.host/v1/
                 fallocate(0, 1, 0, ctypes.c_uint64(0))
             except OSError as err:
                 exc = err
-            self.assertEquals(str(exc), 'FALLOCATE_RESERVE fail 1024 <= 1024')
+            self.assertEqual(str(exc), 'FALLOCATE_RESERVE fail 1024 <= 1024')
             # Want 2048 reserved, have 1024 * 1 free, so fails
             utils.FALLOCATE_RESERVE = 2048
             StatVFS.f_frsize = 1024
@@ -2265,7 +2434,7 @@ cluster_dfw1 = http://dfw1.host/v1/
                 fallocate(0, 1, 0, ctypes.c_uint64(0))
             except OSError as err:
                 exc = err
-            self.assertEquals(str(exc), 'FALLOCATE_RESERVE fail 1024 <= 2048')
+            self.assertEqual(str(exc), 'FALLOCATE_RESERVE fail 1024 <= 2048')
             # Want 2048 reserved, have 512 * 2 free, so fails
             utils.FALLOCATE_RESERVE = 2048
             StatVFS.f_frsize = 512
@@ -2275,7 +2444,7 @@ cluster_dfw1 = http://dfw1.host/v1/
                 fallocate(0, 1, 0, ctypes.c_uint64(0))
             except OSError as err:
                 exc = err
-            self.assertEquals(str(exc), 'FALLOCATE_RESERVE fail 1024 <= 2048')
+            self.assertEqual(str(exc), 'FALLOCATE_RESERVE fail 1024 <= 2048')
             # Want 1023 reserved, have 1024 * 1 free, but file size is 1, so
             # fails
             utils.FALLOCATE_RESERVE = 1023
@@ -2286,19 +2455,19 @@ cluster_dfw1 = http://dfw1.host/v1/
                 fallocate(0, 1, 0, ctypes.c_uint64(1))
             except OSError as err:
                 exc = err
-            self.assertEquals(str(exc), 'FALLOCATE_RESERVE fail 1023 <= 1023')
+            self.assertEqual(str(exc), 'FALLOCATE_RESERVE fail 1023 <= 1023')
             # Want 1022 reserved, have 1024 * 1 free, and file size is 1, so
             # succeeds
             utils.FALLOCATE_RESERVE = 1022
             StatVFS.f_frsize = 1024
             StatVFS.f_bavail = 1
-            self.assertEquals(fallocate(0, 1, 0, ctypes.c_uint64(1)), 0)
+            self.assertEqual(fallocate(0, 1, 0, ctypes.c_uint64(1)), 0)
             # Want 1023 reserved, have 1024 * 1 free, and file size is 0, so
             # succeeds
             utils.FALLOCATE_RESERVE = 1023
             StatVFS.f_frsize = 1024
             StatVFS.f_bavail = 1
-            self.assertEquals(fallocate(0, 1, 0, ctypes.c_uint64(0)), 0)
+            self.assertEqual(fallocate(0, 1, 0, ctypes.c_uint64(0)), 0)
             # Want 1024 reserved, have 1024 * 1 free, and even though
             # file size is 0, since we're under the reserve, fails
             utils.FALLOCATE_RESERVE = 1024
@@ -2309,7 +2478,7 @@ cluster_dfw1 = http://dfw1.host/v1/
                 fallocate(0, 1, 0, ctypes.c_uint64(0))
             except OSError as err:
                 exc = err
-            self.assertEquals(str(exc), 'FALLOCATE_RESERVE fail 1024 <= 1024')
+            self.assertEqual(str(exc), 'FALLOCATE_RESERVE fail 1024 <= 1024')
         finally:
             utils.FALLOCATE_RESERVE = orig_FALLOCATE_RESERVE
             utils.os.fstatvfs = orig_fstatvfs
@@ -2332,23 +2501,23 @@ cluster_dfw1 = http://dfw1.host/v1/
             # Ensure fallocate calls _sys_fallocate even with 0 bytes
             utils._sys_fallocate.last_call = None
             utils.fallocate(1234, 0)
-            self.assertEquals(utils._sys_fallocate.last_call,
-                              [1234, 1, 0, 0])
+            self.assertEqual(utils._sys_fallocate.last_call,
+                             [1234, 1, 0, 0])
             # Ensure fallocate calls _sys_fallocate even with negative bytes
             utils._sys_fallocate.last_call = None
             utils.fallocate(1234, -5678)
-            self.assertEquals(utils._sys_fallocate.last_call,
-                              [1234, 1, 0, 0])
+            self.assertEqual(utils._sys_fallocate.last_call,
+                             [1234, 1, 0, 0])
             # Ensure fallocate calls _sys_fallocate properly with positive
             # bytes
             utils._sys_fallocate.last_call = None
             utils.fallocate(1234, 1)
-            self.assertEquals(utils._sys_fallocate.last_call,
-                              [1234, 1, 0, 1])
+            self.assertEqual(utils._sys_fallocate.last_call,
+                             [1234, 1, 0, 1])
             utils._sys_fallocate.last_call = None
             utils.fallocate(1234, 10 * 1024 * 1024 * 1024)
-            self.assertEquals(utils._sys_fallocate.last_call,
-                              [1234, 1, 0, 10 * 1024 * 1024 * 1024])
+            self.assertEqual(utils._sys_fallocate.last_call,
+                             [1234, 1, 0, 10 * 1024 * 1024 * 1024])
         finally:
             utils._sys_fallocate = orig__sys_fallocate
 
@@ -2356,38 +2525,38 @@ cluster_dfw1 = http://dfw1.host/v1/
         fake_time = 1366428370.5163341
         with patch.object(utils.time, 'time', return_value=fake_time):
             trans_id = utils.generate_trans_id('')
-            self.assertEquals(len(trans_id), 34)
-            self.assertEquals(trans_id[:2], 'tx')
-            self.assertEquals(trans_id[23], '-')
-            self.assertEquals(int(trans_id[24:], 16), int(fake_time))
+            self.assertEqual(len(trans_id), 34)
+            self.assertEqual(trans_id[:2], 'tx')
+            self.assertEqual(trans_id[23], '-')
+            self.assertEqual(int(trans_id[24:], 16), int(fake_time))
         with patch.object(utils.time, 'time', return_value=fake_time):
             trans_id = utils.generate_trans_id('-suffix')
-            self.assertEquals(len(trans_id), 41)
-            self.assertEquals(trans_id[:2], 'tx')
-            self.assertEquals(trans_id[34:], '-suffix')
-            self.assertEquals(trans_id[23], '-')
-            self.assertEquals(int(trans_id[24:34], 16), int(fake_time))
+            self.assertEqual(len(trans_id), 41)
+            self.assertEqual(trans_id[:2], 'tx')
+            self.assertEqual(trans_id[34:], '-suffix')
+            self.assertEqual(trans_id[23], '-')
+            self.assertEqual(int(trans_id[24:34], 16), int(fake_time))
 
     def test_get_trans_id_time(self):
         ts = utils.get_trans_id_time('tx8c8bc884cdaf499bb29429aa9c46946e')
-        self.assertEquals(ts, None)
+        self.assertEqual(ts, None)
         ts = utils.get_trans_id_time('tx1df4ff4f55ea45f7b2ec2-0051720c06')
-        self.assertEquals(ts, 1366428678)
-        self.assertEquals(
+        self.assertEqual(ts, 1366428678)
+        self.assertEqual(
             time.asctime(time.gmtime(ts)) + ' UTC',
             'Sat Apr 20 03:31:18 2013 UTC')
         ts = utils.get_trans_id_time(
             'tx1df4ff4f55ea45f7b2ec2-0051720c06-suffix')
-        self.assertEquals(ts, 1366428678)
-        self.assertEquals(
+        self.assertEqual(ts, 1366428678)
+        self.assertEqual(
             time.asctime(time.gmtime(ts)) + ' UTC',
             'Sat Apr 20 03:31:18 2013 UTC')
         ts = utils.get_trans_id_time('')
-        self.assertEquals(ts, None)
+        self.assertEqual(ts, None)
         ts = utils.get_trans_id_time('garbage')
-        self.assertEquals(ts, None)
+        self.assertEqual(ts, None)
         ts = utils.get_trans_id_time('tx1df4ff4f55ea45f7b2ec2-almostright')
-        self.assertEquals(ts, None)
+        self.assertEqual(ts, None)
 
     def test_tpool_reraise(self):
         with patch.object(utils.tpool, 'execute', lambda f: f()):
@@ -2513,8 +2682,8 @@ cluster_dfw1 = http://dfw1.host/v1/
                         pass
             except LockTimeout:
                 timedout = True
-            self.assert_(timedout)
-            self.assert_(os.path.exists(nt.name))
+            self.assertTrue(timedout)
+            self.assertTrue(os.path.exists(nt.name))
 
     def test_ismount_path_does_not_exist(self):
         tmpdir = mkdtemp()
@@ -2655,23 +2824,23 @@ cluster_dfw1 = http://dfw1.host/v1/
             shutil.rmtree(tmpdir)
 
     def test_parse_content_type(self):
-        self.assertEquals(utils.parse_content_type('text/plain'),
-                          ('text/plain', []))
-        self.assertEquals(utils.parse_content_type('text/plain;charset=utf-8'),
-                          ('text/plain', [('charset', 'utf-8')]))
-        self.assertEquals(
+        self.assertEqual(utils.parse_content_type('text/plain'),
+                         ('text/plain', []))
+        self.assertEqual(utils.parse_content_type('text/plain;charset=utf-8'),
+                         ('text/plain', [('charset', 'utf-8')]))
+        self.assertEqual(
             utils.parse_content_type('text/plain;hello="world";charset=utf-8'),
             ('text/plain', [('hello', '"world"'), ('charset', 'utf-8')]))
-        self.assertEquals(
+        self.assertEqual(
             utils.parse_content_type('text/plain; hello="world"; a=b'),
             ('text/plain', [('hello', '"world"'), ('a', 'b')]))
-        self.assertEquals(
+        self.assertEqual(
             utils.parse_content_type(r'text/plain; x="\""; a=b'),
             ('text/plain', [('x', r'"\""'), ('a', 'b')]))
-        self.assertEquals(
+        self.assertEqual(
             utils.parse_content_type(r'text/plain; x; a=b'),
             ('text/plain', [('x', ''), ('a', 'b')]))
-        self.assertEquals(
+        self.assertEqual(
             utils.parse_content_type(r'text/plain; x="\""; a'),
             ('text/plain', [('x', r'"\""'), ('a', '')]))
 
@@ -2681,18 +2850,18 @@ cluster_dfw1 = http://dfw1.host/v1/
             'content_type': 'text/plain; hello="world"; swift_bytes=15'}
         utils.override_bytes_from_content_type(listing_dict,
                                                logger=FakeLogger())
-        self.assertEquals(listing_dict['bytes'], 15)
-        self.assertEquals(listing_dict['content_type'],
-                          'text/plain;hello="world"')
+        self.assertEqual(listing_dict['bytes'], 15)
+        self.assertEqual(listing_dict['content_type'],
+                         'text/plain;hello="world"')
 
         listing_dict = {
             'bytes': 1234, 'hash': 'asdf', 'name': 'zxcv',
             'content_type': 'text/plain; hello="world"; swift_bytes=hey'}
         utils.override_bytes_from_content_type(listing_dict,
                                                logger=FakeLogger())
-        self.assertEquals(listing_dict['bytes'], 1234)
-        self.assertEquals(listing_dict['content_type'],
-                          'text/plain;hello="world"')
+        self.assertEqual(listing_dict['bytes'], 1234)
+        self.assertEqual(listing_dict['content_type'],
+                         'text/plain;hello="world"')
 
     def test_clean_content_type(self):
         subtests = {
@@ -2722,13 +2891,13 @@ cluster_dfw1 = http://dfw1.host/v1/
         valid_utf8_str = utils.get_valid_utf8_str(account)
         account = 'abc_' + unicode_sample.encode('utf-8')[::-1]
         invalid_utf8_str = utils.get_valid_utf8_str(account)
-        self.assertEquals('abc_%EC%9D%BC%EC%98%81',
-                          utils.quote(valid_utf8_str))
-        self.assertEquals('abc_%EF%BF%BD%EF%BF%BD%EC%BC%9D%EF%BF%BD',
-                          utils.quote(invalid_utf8_str))
+        self.assertEqual('abc_%EC%9D%BC%EC%98%81',
+                         utils.quote(valid_utf8_str))
+        self.assertEqual('abc_%EF%BF%BD%EF%BF%BD%EC%BC%9D%EF%BF%BD',
+                         utils.quote(invalid_utf8_str))
 
     def test_get_hmac(self):
-        self.assertEquals(
+        self.assertEqual(
             utils.get_hmac('GET', '/path', 1, 'abc'),
             'b17f6ff8da0e251737aa9e3ee69a881e3e092e2f')
 
@@ -2738,16 +2907,16 @@ cluster_dfw1 = http://dfw1.host/v1/
             '/sda1/p/a',
             environ={'REQUEST_METHOD': 'GET'})
         res = Response()
-        self.assertEquals(None, utils.get_policy_index(req.headers,
-                                                       res.headers))
+        self.assertEqual(None, utils.get_policy_index(req.headers,
+                                                      res.headers))
 
         # The policy of a container can be specified by the response header
         req = Request.blank(
             '/sda1/p/a/c',
             environ={'REQUEST_METHOD': 'GET'})
         res = Response(headers={'X-Backend-Storage-Policy-Index': '1'})
-        self.assertEquals('1', utils.get_policy_index(req.headers,
-                                                      res.headers))
+        self.assertEqual('1', utils.get_policy_index(req.headers,
+                                                     res.headers))
 
         # The policy of an object to be created can be specified by the request
         # header
@@ -2756,8 +2925,8 @@ cluster_dfw1 = http://dfw1.host/v1/
             environ={'REQUEST_METHOD': 'PUT'},
             headers={'X-Backend-Storage-Policy-Index': '2'})
         res = Response()
-        self.assertEquals('2', utils.get_policy_index(req.headers,
-                                                      res.headers))
+        self.assertEqual('2', utils.get_policy_index(req.headers,
+                                                     res.headers))
 
     def test_get_log_line(self):
         req = Request.blank(
@@ -2774,7 +2943,7 @@ cluster_dfw1 = http://dfw1.host/v1/
                 mock.MagicMock(side_effect=[time.gmtime(10001.0)])):
             with mock.patch(
                     'os.getpid', mock.MagicMock(return_value=server_pid)):
-                self.assertEquals(
+                self.assertEqual(
                     exp_line,
                     utils.get_log_line(req, res, trans_time, additional_info))
 
@@ -2987,15 +3156,15 @@ class ResellerConfReader(unittest.TestCase):
             conf, self.default_rules)
         self.assertEqual(prefixes, ['PRE1_', 'PRE2_'])
 
-        self.assertEquals(set(['role1', 'role2']),
-                          set(options['PRE1_'].get('operator_roles')))
-        self.assertEquals(['role5'],
-                          options['PRE2_'].get('operator_roles'))
-        self.assertEquals(set(['role3', 'role4']),
-                          set(options['PRE1_'].get('service_roles')))
-        self.assertEquals(['role6'], options['PRE2_'].get('service_roles'))
-        self.assertEquals('', options['PRE1_'].get('require_group'))
-        self.assertEquals('pre2_group', options['PRE2_'].get('require_group'))
+        self.assertEqual(set(['role1', 'role2']),
+                         set(options['PRE1_'].get('operator_roles')))
+        self.assertEqual(['role5'],
+                         options['PRE2_'].get('operator_roles'))
+        self.assertEqual(set(['role3', 'role4']),
+                         set(options['PRE1_'].get('service_roles')))
+        self.assertEqual(['role6'], options['PRE2_'].get('service_roles'))
+        self.assertEqual('', options['PRE1_'].get('require_group'))
+        self.assertEqual('pre2_group', options['PRE2_'].get('require_group'))
 
     def test_several_resellers_first_blank(self):
         conf = {'reseller_prefix': " '' , PRE2",
@@ -3008,15 +3177,15 @@ class ResellerConfReader(unittest.TestCase):
             conf, self.default_rules)
         self.assertEqual(prefixes, ['', 'PRE2_'])
 
-        self.assertEquals(set(['role1', 'role2']),
-                          set(options[''].get('operator_roles')))
-        self.assertEquals(['role5'],
-                          options['PRE2_'].get('operator_roles'))
-        self.assertEquals(set(['role3', 'role4']),
-                          set(options[''].get('service_roles')))
-        self.assertEquals(['role6'], options['PRE2_'].get('service_roles'))
-        self.assertEquals('', options[''].get('require_group'))
-        self.assertEquals('pre2_group', options['PRE2_'].get('require_group'))
+        self.assertEqual(set(['role1', 'role2']),
+                         set(options[''].get('operator_roles')))
+        self.assertEqual(['role5'],
+                         options['PRE2_'].get('operator_roles'))
+        self.assertEqual(set(['role3', 'role4']),
+                         set(options[''].get('service_roles')))
+        self.assertEqual(['role6'], options['PRE2_'].get('service_roles'))
+        self.assertEqual('', options[''].get('require_group'))
+        self.assertEqual('pre2_group', options['PRE2_'].get('require_group'))
 
     def test_several_resellers_with_blank_comma(self):
         conf = {'reseller_prefix': "AUTH , '', PRE2",
@@ -3028,20 +3197,20 @@ class ResellerConfReader(unittest.TestCase):
         prefixes, options = utils.config_read_reseller_options(
             conf, self.default_rules)
         self.assertEqual(prefixes, ['AUTH_', '', 'PRE2_'])
-        self.assertEquals(set(['admin', 'swiftoperator']),
-                          set(options['AUTH_'].get('operator_roles')))
-        self.assertEquals(set(['role1', 'role2']),
-                          set(options[''].get('operator_roles')))
-        self.assertEquals(['role5'],
-                          options['PRE2_'].get('operator_roles'))
-        self.assertEquals([],
-                          options['AUTH_'].get('service_roles'))
-        self.assertEquals(set(['role3', 'role4']),
-                          set(options[''].get('service_roles')))
-        self.assertEquals(['role6'], options['PRE2_'].get('service_roles'))
-        self.assertEquals('', options['AUTH_'].get('require_group'))
-        self.assertEquals('', options[''].get('require_group'))
-        self.assertEquals('pre2_group', options['PRE2_'].get('require_group'))
+        self.assertEqual(set(['admin', 'swiftoperator']),
+                         set(options['AUTH_'].get('operator_roles')))
+        self.assertEqual(set(['role1', 'role2']),
+                         set(options[''].get('operator_roles')))
+        self.assertEqual(['role5'],
+                         options['PRE2_'].get('operator_roles'))
+        self.assertEqual([],
+                         options['AUTH_'].get('service_roles'))
+        self.assertEqual(set(['role3', 'role4']),
+                         set(options[''].get('service_roles')))
+        self.assertEqual(['role6'], options['PRE2_'].get('service_roles'))
+        self.assertEqual('', options['AUTH_'].get('require_group'))
+        self.assertEqual('', options[''].get('require_group'))
+        self.assertEqual('pre2_group', options['PRE2_'].get('require_group'))
 
     def test_stray_comma(self):
         conf = {'reseller_prefix': "AUTH ,, PRE2",
@@ -3053,15 +3222,15 @@ class ResellerConfReader(unittest.TestCase):
         prefixes, options = utils.config_read_reseller_options(
             conf, self.default_rules)
         self.assertEqual(prefixes, ['AUTH_', 'PRE2_'])
-        self.assertEquals(set(['admin', 'swiftoperator']),
-                          set(options['AUTH_'].get('operator_roles')))
-        self.assertEquals(['role5'],
-                          options['PRE2_'].get('operator_roles'))
-        self.assertEquals([],
-                          options['AUTH_'].get('service_roles'))
-        self.assertEquals(['role6'], options['PRE2_'].get('service_roles'))
-        self.assertEquals('', options['AUTH_'].get('require_group'))
-        self.assertEquals('pre2_group', options['PRE2_'].get('require_group'))
+        self.assertEqual(set(['admin', 'swiftoperator']),
+                         set(options['AUTH_'].get('operator_roles')))
+        self.assertEqual(['role5'],
+                         options['PRE2_'].get('operator_roles'))
+        self.assertEqual([],
+                         options['AUTH_'].get('service_roles'))
+        self.assertEqual(['role6'], options['PRE2_'].get('service_roles'))
+        self.assertEqual('', options['AUTH_'].get('require_group'))
+        self.assertEqual('pre2_group', options['PRE2_'].get('require_group'))
 
     def test_multiple_stray_commas_resellers(self):
         conf = {'reseller_prefix': ' , , ,'}
@@ -3081,21 +3250,21 @@ class ResellerConfReader(unittest.TestCase):
         prefixes, options = utils.config_read_reseller_options(
             conf, self.default_rules)
         self.assertEqual(prefixes, ['AUTH_', '', 'PRE2_'])
-        self.assertEquals(set(['role1', 'role2']),
-                          set(options['AUTH_'].get('operator_roles')))
-        self.assertEquals(set(['role1', 'role2']),
-                          set(options[''].get('operator_roles')))
-        self.assertEquals(['role5'],
-                          options['PRE2_'].get('operator_roles'))
-        self.assertEquals(set(['role3', 'role4']),
-                          set(options['AUTH_'].get('service_roles')))
-        self.assertEquals(set(['role3', 'role4']),
-                          set(options[''].get('service_roles')))
-        self.assertEquals(['role6'], options['PRE2_'].get('service_roles'))
-        self.assertEquals('auth_blank_group',
-                          options['AUTH_'].get('require_group'))
-        self.assertEquals('auth_blank_group', options[''].get('require_group'))
-        self.assertEquals('pre2_group', options['PRE2_'].get('require_group'))
+        self.assertEqual(set(['role1', 'role2']),
+                         set(options['AUTH_'].get('operator_roles')))
+        self.assertEqual(set(['role1', 'role2']),
+                         set(options[''].get('operator_roles')))
+        self.assertEqual(['role5'],
+                         options['PRE2_'].get('operator_roles'))
+        self.assertEqual(set(['role3', 'role4']),
+                         set(options['AUTH_'].get('service_roles')))
+        self.assertEqual(set(['role3', 'role4']),
+                         set(options[''].get('service_roles')))
+        self.assertEqual(['role6'], options['PRE2_'].get('service_roles'))
+        self.assertEqual('auth_blank_group',
+                         options['AUTH_'].get('require_group'))
+        self.assertEqual('auth_blank_group', options[''].get('require_group'))
+        self.assertEqual('pre2_group', options['PRE2_'].get('require_group'))
 
 
 class TestSwiftInfo(unittest.TestCase):
@@ -3266,7 +3435,7 @@ class TestSwiftInfo(unittest.TestCase):
             admin=True, disallowed_sections=['cap1.cap1_foo', 'cap3',
                                              'cap4.a.b.c'])
         self.assertTrue('cap3' not in info)
-        self.assertEquals(info['cap1']['cap1_moo'], 'cap1_baa')
+        self.assertEqual(info['cap1']['cap1_moo'], 'cap1_baa')
         self.assertTrue('cap1_foo' not in info['cap1'])
         self.assertTrue('c' not in info['cap4']['a']['b'])
         self.assertEqual(info['cap4']['a']['b.c'], 'b.c')
@@ -3280,7 +3449,7 @@ class TestSwiftInfo(unittest.TestCase):
         info = utils.get_swift_info(
             disallowed_sections=['cap2.cap1_foo', 'cap1.no_match',
                                  'cap1.cap1_foo.no_match.no_match'])
-        self.assertEquals(info['cap1'], cap1)
+        self.assertEqual(info['cap1'], cap1)
 
 
 class TestFileLikeIter(unittest.TestCase):
@@ -3290,7 +3459,7 @@ class TestFileLikeIter(unittest.TestCase):
         chunks = []
         for chunk in utils.FileLikeIter(in_iter):
             chunks.append(chunk)
-        self.assertEquals(chunks, in_iter)
+        self.assertEqual(chunks, in_iter)
 
     def test_next(self):
         in_iter = ['abc', 'de', 'fghijk', 'l']
@@ -3298,16 +3467,16 @@ class TestFileLikeIter(unittest.TestCase):
         iter_file = utils.FileLikeIter(in_iter)
         while True:
             try:
-                chunk = iter_file.next()
+                chunk = next(iter_file)
             except StopIteration:
                 break
             chunks.append(chunk)
-        self.assertEquals(chunks, in_iter)
+        self.assertEqual(chunks, in_iter)
 
     def test_read(self):
         in_iter = ['abc', 'de', 'fghijk', 'l']
         iter_file = utils.FileLikeIter(in_iter)
-        self.assertEquals(iter_file.read(), ''.join(in_iter))
+        self.assertEqual(iter_file.read(), ''.join(in_iter))
 
     def test_read_with_size(self):
         in_iter = ['abc', 'de', 'fghijk', 'l']
@@ -3319,11 +3488,11 @@ class TestFileLikeIter(unittest.TestCase):
                 break
             self.assertTrue(len(chunk) <= 2)
             chunks.append(chunk)
-        self.assertEquals(''.join(chunks), ''.join(in_iter))
+        self.assertEqual(''.join(chunks), ''.join(in_iter))
 
     def test_read_with_size_zero(self):
         # makes little sense, but file supports it, so...
-        self.assertEquals(utils.FileLikeIter('abc').read(0), '')
+        self.assertEqual(utils.FileLikeIter('abc').read(0), '')
 
     def test_readline(self):
         in_iter = ['abc\n', 'd', '\nef', 'g\nh', '\nij\n\nk\n', 'trailing.']
@@ -3334,18 +3503,18 @@ class TestFileLikeIter(unittest.TestCase):
             if not line:
                 break
             lines.append(line)
-        self.assertEquals(
+        self.assertEqual(
             lines,
             [v if v == 'trailing.' else v + '\n'
              for v in ''.join(in_iter).split('\n')])
 
     def test_readline2(self):
-        self.assertEquals(
+        self.assertEqual(
             utils.FileLikeIter(['abc', 'def\n']).readline(4),
             'abcd')
 
     def test_readline3(self):
-        self.assertEquals(
+        self.assertEqual(
             utils.FileLikeIter(['a' * 1111, 'bc\ndef']).readline(),
             ('a' * 1111) + 'bc\n')
 
@@ -3359,7 +3528,7 @@ class TestFileLikeIter(unittest.TestCase):
             if not line:
                 break
             lines.append(line)
-        self.assertEquals(
+        self.assertEqual(
             lines,
             ['ab', 'c\n', 'd\n', 'ef', 'g\n', 'h\n', 'ij', '\n', '\n', 'k\n',
              'tr', 'ai', 'li', 'ng', '.'])
@@ -3367,7 +3536,7 @@ class TestFileLikeIter(unittest.TestCase):
     def test_readlines(self):
         in_iter = ['abc\n', 'd', '\nef', 'g\nh', '\nij\n\nk\n', 'trailing.']
         lines = utils.FileLikeIter(in_iter).readlines()
-        self.assertEquals(
+        self.assertEqual(
             lines,
             [v if v == 'trailing.' else v + '\n'
              for v in ''.join(in_iter).split('\n')])
@@ -3381,14 +3550,14 @@ class TestFileLikeIter(unittest.TestCase):
             if not lines:
                 break
             lists_of_lines.append(lines)
-        self.assertEquals(
+        self.assertEqual(
             lists_of_lines,
             [['ab'], ['c\n'], ['d\n'], ['ef'], ['g\n'], ['h\n'], ['ij'],
              ['\n', '\n'], ['k\n'], ['tr'], ['ai'], ['li'], ['ng'], ['.']])
 
     def test_close(self):
         iter_file = utils.FileLikeIter('abcdef')
-        self.assertEquals(iter_file.next(), 'a')
+        self.assertEqual(next(iter_file), 'a')
         iter_file.close()
         self.assertTrue(iter_file.closed)
         self.assertRaises(ValueError, iter_file.next)
@@ -3410,8 +3579,8 @@ class TestStatsdLogging(unittest.TestCase):
         logger = utils.get_logger({'log_statsd_host': 'some.host.com'},
                                   'some-name', log_route='some-route')
         # white-box construction validation
-        self.assert_(isinstance(logger.logger.statsd_client,
-                                utils.StatsdClient))
+        self.assertTrue(isinstance(logger.logger.statsd_client,
+                                   utils.StatsdClient))
         self.assertEqual(logger.logger.statsd_client._host, 'some.host.com')
         self.assertEqual(logger.logger.statsd_client._port, 8125)
         self.assertEqual(logger.logger.statsd_client._prefix, 'some-name.')
@@ -3532,38 +3701,38 @@ class TestStatsdLogging(unittest.TestCase):
 
         mock_controller = MockController(200)
         METHOD(mock_controller)
-        self.assertEquals(mock_controller.called, 'timing')
-        self.assertEquals(len(mock_controller.args), 2)
-        self.assertEquals(mock_controller.args[0], 'METHOD.timing')
-        self.assert_(mock_controller.args[1] > 0)
+        self.assertEqual(mock_controller.called, 'timing')
+        self.assertEqual(len(mock_controller.args), 2)
+        self.assertEqual(mock_controller.args[0], 'METHOD.timing')
+        self.assertTrue(mock_controller.args[1] > 0)
 
         mock_controller = MockController(404)
         METHOD(mock_controller)
-        self.assertEquals(len(mock_controller.args), 2)
-        self.assertEquals(mock_controller.called, 'timing')
-        self.assertEquals(mock_controller.args[0], 'METHOD.timing')
-        self.assert_(mock_controller.args[1] > 0)
+        self.assertEqual(len(mock_controller.args), 2)
+        self.assertEqual(mock_controller.called, 'timing')
+        self.assertEqual(mock_controller.args[0], 'METHOD.timing')
+        self.assertTrue(mock_controller.args[1] > 0)
 
         mock_controller = MockController(412)
         METHOD(mock_controller)
-        self.assertEquals(len(mock_controller.args), 2)
-        self.assertEquals(mock_controller.called, 'timing')
-        self.assertEquals(mock_controller.args[0], 'METHOD.timing')
-        self.assert_(mock_controller.args[1] > 0)
+        self.assertEqual(len(mock_controller.args), 2)
+        self.assertEqual(mock_controller.called, 'timing')
+        self.assertEqual(mock_controller.args[0], 'METHOD.timing')
+        self.assertTrue(mock_controller.args[1] > 0)
 
         mock_controller = MockController(416)
         METHOD(mock_controller)
-        self.assertEquals(len(mock_controller.args), 2)
-        self.assertEquals(mock_controller.called, 'timing')
-        self.assertEquals(mock_controller.args[0], 'METHOD.timing')
-        self.assert_(mock_controller.args[1] > 0)
+        self.assertEqual(len(mock_controller.args), 2)
+        self.assertEqual(mock_controller.called, 'timing')
+        self.assertEqual(mock_controller.args[0], 'METHOD.timing')
+        self.assertTrue(mock_controller.args[1] > 0)
 
         mock_controller = MockController(401)
         METHOD(mock_controller)
-        self.assertEquals(len(mock_controller.args), 2)
-        self.assertEquals(mock_controller.called, 'timing')
-        self.assertEquals(mock_controller.args[0], 'METHOD.errors.timing')
-        self.assert_(mock_controller.args[1] > 0)
+        self.assertEqual(len(mock_controller.args), 2)
+        self.assertEqual(mock_controller.called, 'timing')
+        self.assertEqual(mock_controller.args[0], 'METHOD.errors.timing')
+        self.assertTrue(mock_controller.args[1] > 0)
 
 
 class UnsafeXrange(object):
@@ -3621,14 +3790,14 @@ class TestAffinityKeyFunction(unittest.TestCase):
     def test_empty_value(self):
         # Empty's okay, it just means no preference
         keyfn = utils.affinity_key_function("")
-        self.assert_(callable(keyfn))
+        self.assertTrue(callable(keyfn))
         ids = [n['id'] for n in sorted(self.nodes, key=keyfn)]
         self.assertEqual([0, 1, 2, 3, 4, 5, 6, 7], ids)
 
     def test_all_whitespace_value(self):
         # Empty's okay, it just means no preference
         keyfn = utils.affinity_key_function("  \n")
-        self.assert_(callable(keyfn))
+        self.assertTrue(callable(keyfn))
         ids = [n['id'] for n in sorted(self.nodes, key=keyfn)]
         self.assertEqual([0, 1, 2, 3, 4, 5, 6, 7], ids)
 
@@ -3661,23 +3830,23 @@ class TestAffinityLocalityPredicate(unittest.TestCase):
 
     def test_empty(self):
         pred = utils.affinity_locality_predicate('')
-        self.assert_(pred is None)
+        self.assertTrue(pred is None)
 
     def test_region(self):
         pred = utils.affinity_locality_predicate('r1')
-        self.assert_(callable(pred))
+        self.assertTrue(callable(pred))
         ids = [n['id'] for n in self.nodes if pred(n)]
         self.assertEqual([0, 1], ids)
 
     def test_zone(self):
         pred = utils.affinity_locality_predicate('r1z1')
-        self.assert_(callable(pred))
+        self.assertTrue(callable(pred))
         ids = [n['id'] for n in self.nodes if pred(n)]
         self.assertEqual([0], ids)
 
     def test_multiple(self):
         pred = utils.affinity_locality_predicate('r1, r3, r4z0')
-        self.assert_(callable(pred))
+        self.assertTrue(callable(pred))
         ids = [n['id'] for n in self.nodes if pred(n)]
         self.assertEqual([0, 1, 4, 5, 6], ids)
 
@@ -3706,20 +3875,19 @@ class TestRateLimitedIterator(unittest.TestCase):
             curr_time[0] += 0.001
             curr_time[0] += duration
 
-        with nested(
-                patch('time.time', my_time),
-                patch('eventlet.sleep', my_sleep)):
+        with patch('time.time', my_time), \
+                patch('eventlet.sleep', my_sleep):
             return func(*args, **kwargs)
 
     def test_rate_limiting(self):
 
         def testfunc():
-            limited_iterator = utils.RateLimitedIterator(xrange(9999), 100)
+            limited_iterator = utils.RateLimitedIterator(range(9999), 100)
             got = []
             started_at = time.time()
             try:
                 while time.time() - started_at < 0.1:
-                    got.append(limited_iterator.next())
+                    got.append(next(limited_iterator))
             except StopIteration:
                 pass
             return got
@@ -3727,18 +3895,18 @@ class TestRateLimitedIterator(unittest.TestCase):
         got = self.run_under_pseudo_time(testfunc)
         # it's 11, not 10, because ratelimiting doesn't apply to the very
         # first element.
-        self.assertEquals(len(got), 11)
+        self.assertEqual(len(got), 11)
 
     def test_limit_after(self):
 
         def testfunc():
             limited_iterator = utils.RateLimitedIterator(
-                xrange(9999), 100, limit_after=5)
+                range(9999), 100, limit_after=5)
             got = []
             started_at = time.time()
             try:
                 while time.time() - started_at < 0.1:
-                    got.append(limited_iterator.next())
+                    got.append(next(limited_iterator))
             except StopIteration:
                 pass
             return got
@@ -3746,7 +3914,7 @@ class TestRateLimitedIterator(unittest.TestCase):
         got = self.run_under_pseudo_time(testfunc)
         # it's 16, not 15, because ratelimiting doesn't apply to the very
         # first element.
-        self.assertEquals(len(got), 16)
+        self.assertEqual(len(got), 16)
 
 
 class TestGreenthreadSafeIterator(unittest.TestCase):
@@ -3759,11 +3927,11 @@ class TestGreenthreadSafeIterator(unittest.TestCase):
 
     def test_setup_works(self):
         # it should work without concurrent access
-        self.assertEquals([0, 1, 2, 3], list(UnsafeXrange(4)))
+        self.assertEqual([0, 1, 2, 3], list(UnsafeXrange(4)))
 
         iterable = UnsafeXrange(10)
         pile = eventlet.GreenPile(2)
-        for _ in xrange(2):
+        for _ in range(2):
             pile.spawn(self.increment, iterable)
 
         sorted([resp for resp in pile])
@@ -3774,10 +3942,10 @@ class TestGreenthreadSafeIterator(unittest.TestCase):
         pile = eventlet.GreenPile(2)
         unsafe_iterable = UnsafeXrange(10)
         iterable = utils.GreenthreadSafeIterator(unsafe_iterable)
-        for _ in xrange(2):
+        for _ in range(2):
             pile.spawn(self.increment, iterable)
         response = sorted(sum([resp for resp in pile], []))
-        self.assertEquals(range(1, 11), response)
+        self.assertEqual(list(range(1, 11)), response)
         self.assertTrue(
             not unsafe_iterable.concurrent_call, 'concurrent call occurred')
 
@@ -3837,8 +4005,8 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
 
     def assertStatMatches(self, expected_regexp, sender_fn, *args, **kwargs):
         got = self._send_and_get(sender_fn, *args, **kwargs)
-        return self.assert_(re.search(expected_regexp, got),
-                            [got, expected_regexp])
+        return self.assertTrue(re.search(expected_regexp, got),
+                               [got, expected_regexp])
 
     def test_methods_are_no_ops_when_not_enabled(self):
         logger = utils.get_logger({
@@ -4001,28 +4169,28 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
         unicode_sample = u'\uc77c\uc601'
         valid_utf8_str = unicode_sample.encode('utf-8')
         invalid_utf8_str = unicode_sample.encode('utf-8')[::-1]
-        self.assertEquals(valid_utf8_str,
-                          utils.get_valid_utf8_str(valid_utf8_str))
-        self.assertEquals(valid_utf8_str,
-                          utils.get_valid_utf8_str(unicode_sample))
-        self.assertEquals('\xef\xbf\xbd\xef\xbf\xbd\xec\xbc\x9d\xef\xbf\xbd',
-                          utils.get_valid_utf8_str(invalid_utf8_str))
+        self.assertEqual(valid_utf8_str,
+                         utils.get_valid_utf8_str(valid_utf8_str))
+        self.assertEqual(valid_utf8_str,
+                         utils.get_valid_utf8_str(unicode_sample))
+        self.assertEqual('\xef\xbf\xbd\xef\xbf\xbd\xec\xbc\x9d\xef\xbf\xbd',
+                         utils.get_valid_utf8_str(invalid_utf8_str))
 
     @reset_logger_state
     def test_thread_locals(self):
         logger = utils.get_logger(None)
         # test the setter
         logger.thread_locals = ('id', 'ip')
-        self.assertEquals(logger.thread_locals, ('id', 'ip'))
+        self.assertEqual(logger.thread_locals, ('id', 'ip'))
         # reset
         logger.thread_locals = (None, None)
-        self.assertEquals(logger.thread_locals, (None, None))
+        self.assertEqual(logger.thread_locals, (None, None))
         logger.txn_id = '1234'
         logger.client_ip = '1.2.3.4'
-        self.assertEquals(logger.thread_locals, ('1234', '1.2.3.4'))
+        self.assertEqual(logger.thread_locals, ('1234', '1.2.3.4'))
         logger.txn_id = '5678'
         logger.client_ip = '5.6.7.8'
-        self.assertEquals(logger.thread_locals, ('5678', '5.6.7.8'))
+        self.assertEqual(logger.thread_locals, ('5678', '5.6.7.8'))
 
     def test_no_fdatasync(self):
         called = []
@@ -4036,7 +4204,7 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
         with patch('swift.common.utils.os', NoFdatasync()):
             with patch('swift.common.utils.fsync', fsync):
                 utils.fdatasync(12345)
-                self.assertEquals(called, [12345])
+                self.assertEqual(called, [12345])
 
     def test_yes_fdatasync(self):
         called = []
@@ -4048,7 +4216,7 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
 
         with patch('swift.common.utils.os', YesFdatasync()):
             utils.fdatasync(12345)
-            self.assertEquals(called, [12345])
+            self.assertEqual(called, [12345])
 
     def test_fsync_bad_fullsync(self):
 
@@ -4075,7 +4243,7 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
 
         with patch('swift.common.utils.fcntl', FCNTL()):
             utils.fsync(12345)
-            self.assertEquals(called, [12345, 123])
+            self.assertEqual(called, [12345, 123])
 
     def test_fsync_no_fullsync(self):
         called = []
@@ -4089,7 +4257,7 @@ class TestStatsdLoggingDelegation(unittest.TestCase):
         with patch('swift.common.utils.fcntl', FCNTL()):
             with patch('os.fsync', fsync):
                 utils.fsync(12345)
-                self.assertEquals(called, [12345])
+                self.assertEqual(called, [12345])
 
 
 class TestThreadPool(unittest.TestCase):
@@ -4129,11 +4297,11 @@ class TestThreadPool(unittest.TestCase):
 
         my_id = self._thread_id()
         other_id = tp.run_in_thread(self._thread_id)
-        self.assertNotEquals(my_id, other_id)
+        self.assertNotEqual(my_id, other_id)
 
         result = tp.run_in_thread(self._capture_args, 1, 2, bert='ernie')
-        self.assertEquals(result, {'args': (1, 2),
-                                   'kwargs': {'bert': 'ernie'}})
+        self.assertEqual(result, {'args': (1, 2),
+                                  'kwargs': {'bert': 'ernie'}})
 
         caught = False
         try:
@@ -4148,11 +4316,11 @@ class TestThreadPool(unittest.TestCase):
 
         my_id = self._thread_id()
         other_id = tp.force_run_in_thread(self._thread_id)
-        self.assertNotEquals(my_id, other_id)
+        self.assertNotEqual(my_id, other_id)
 
         result = tp.force_run_in_thread(self._capture_args, 1, 2, bert='ernie')
-        self.assertEquals(result, {'args': (1, 2),
-                                   'kwargs': {'bert': 'ernie'}})
+        self.assertEqual(result, {'args': (1, 2),
+                                  'kwargs': {'bert': 'ernie'}})
         self.assertRaises(ValueError, tp.force_run_in_thread,
                           self._raise_valueerror)
 
@@ -4162,11 +4330,11 @@ class TestThreadPool(unittest.TestCase):
 
         my_id = self._thread_id()
         other_id = tp.run_in_thread(self._thread_id)
-        self.assertEquals(my_id, other_id)
+        self.assertEqual(my_id, other_id)
 
         result = tp.run_in_thread(self._capture_args, 1, 2, bert='ernie')
-        self.assertEquals(result, {'args': (1, 2),
-                                   'kwargs': {'bert': 'ernie'}})
+        self.assertEqual(result, {'args': (1, 2),
+                                  'kwargs': {'bert': 'ernie'}})
         self.assertRaises(ValueError, tp.run_in_thread,
                           self._raise_valueerror)
 
@@ -4176,11 +4344,11 @@ class TestThreadPool(unittest.TestCase):
 
         my_id = self._thread_id()
         other_id = tp.force_run_in_thread(self._thread_id)
-        self.assertNotEquals(my_id, other_id)
+        self.assertNotEqual(my_id, other_id)
 
         result = tp.force_run_in_thread(self._capture_args, 1, 2, bert='ernie')
-        self.assertEquals(result, {'args': (1, 2),
-                                   'kwargs': {'bert': 'ernie'}})
+        self.assertEqual(result, {'args': (1, 2),
+                                  'kwargs': {'bert': 'ernie'}})
         self.assertRaises(ValueError, tp.force_run_in_thread,
                           self._raise_valueerror)
 
@@ -4200,7 +4368,7 @@ class TestThreadPool(unittest.TestCase):
         except ZeroDivisionError:
             # NB: format is (filename, line number, function name, text)
             tb_func = [elem[2] for elem
-                       in traceback.extract_tb(sys.exc_traceback)]
+                       in traceback.extract_tb(sys.exc_info()[2])]
         else:
             self.fail("Expected ZeroDivisionError")
 
@@ -4266,7 +4434,7 @@ class TestAuditLocationGenerator(unittest.TestCase):
             else:
                 return orig_listdir(path)
 
-        #Check Raise on Bad partition
+        # Check Raise on Bad partition
         tmpdir = mkdtemp()
         data = os.path.join(tmpdir, "drive", "data")
         os.makedirs(data)
@@ -4283,7 +4451,7 @@ class TestAuditLocationGenerator(unittest.TestCase):
             self.assertRaises(OSError, audit)
         rmtree(tmpdir)
 
-        #Check Raise on Bad Suffix
+        # Check Raise on Bad Suffix
         tmpdir = mkdtemp()
         data = os.path.join(tmpdir, "drive", "data")
         os.makedirs(data)
@@ -4302,7 +4470,7 @@ class TestAuditLocationGenerator(unittest.TestCase):
             self.assertRaises(OSError, audit)
         rmtree(tmpdir)
 
-        #Check Raise on Bad Hash
+        # Check Raise on Bad Hash
         tmpdir = mkdtemp()
         data = os.path.join(tmpdir, "drive", "data")
         os.makedirs(data)
@@ -4326,14 +4494,14 @@ class TestAuditLocationGenerator(unittest.TestCase):
             logger = FakeLogger()
             data = os.path.join(tmpdir, "drive", "data")
             os.makedirs(data)
-            #Create a file, that represents a non-dir drive
+            # Create a file, that represents a non-dir drive
             open(os.path.join(tmpdir, 'asdf'), 'w')
             locations = utils.audit_location_generator(
                 tmpdir, "data", mount_check=False, logger=logger
             )
             self.assertEqual(list(locations), [])
             self.assertEqual(1, len(logger.get_lines_for_level('warning')))
-            #Test without the logger
+            # Test without the logger
             locations = utils.audit_location_generator(
                 tmpdir, "data", mount_check=False
             )
@@ -4344,7 +4512,7 @@ class TestAuditLocationGenerator(unittest.TestCase):
             logger = FakeLogger()
             data = os.path.join(tmpdir, "drive", "data")
             os.makedirs(data)
-            #Create a file, that represents a non-dir drive
+            # Create a file, that represents a non-dir drive
             open(os.path.join(tmpdir, 'asdf'), 'w')
             locations = utils.audit_location_generator(
                 tmpdir, "data", mount_check=True, logger=logger
@@ -4352,7 +4520,7 @@ class TestAuditLocationGenerator(unittest.TestCase):
             self.assertEqual(list(locations), [])
             self.assertEqual(2, len(logger.get_lines_for_level('warning')))
 
-            #Test without the logger
+            # Test without the logger
             locations = utils.audit_location_generator(
                 tmpdir, "data", mount_check=True
             )
@@ -4384,7 +4552,7 @@ class TestAuditLocationGenerator(unittest.TestCase):
             logger = FakeLogger()
             data = os.path.join(tmpdir, "drive", "data")
             os.makedirs(data)
-            #Create a file, that represents a non-dir drive
+            # Create a file, that represents a non-dir drive
             open(os.path.join(tmpdir, 'asdf'), 'w')
             partition = os.path.join(data, "partition1")
             os.makedirs(partition)
@@ -4445,7 +4613,7 @@ class TestGreenAsyncPile(unittest.TestCase):
             return tests_ran[0]
         tests_ran = [0]
         pile = utils.GreenAsyncPile(3)
-        for x in xrange(3):
+        for x in range(3):
             pile.spawn(run_test)
         self.assertEqual(sorted(x for x in pile), [1, 2, 3])
 
@@ -4458,7 +4626,7 @@ class TestGreenAsyncPile(unittest.TestCase):
         for order in ((1, 2, 0), (0, 1, 2), (2, 1, 0), (0, 2, 1)):
             events = [eventlet.event.Event(), eventlet.event.Event(),
                       eventlet.event.Event()]
-            for x in xrange(3):
+            for x in range(3):
                 pile.spawn(run_test, x)
             for x in order:
                 events[x].send()
@@ -4497,6 +4665,22 @@ class TestGreenAsyncPile(unittest.TestCase):
         pile.spawn(run_test, 0.1)
         self.assertEqual(pile.waitall(0.5), [0.1, 0.1])
         self.assertEqual(completed[0], 2)
+
+    def test_pending(self):
+        pile = utils.GreenAsyncPile(3)
+        self.assertEqual(0, pile._pending)
+        for repeats in range(2):
+            # repeat to verify that pending will go again up after going down
+            for i in range(4):
+                pile.spawn(lambda: i)
+            self.assertEqual(4, pile._pending)
+            for i in range(3, -1, -1):
+                next(pile)
+                self.assertEqual(i, pile._pending)
+            # sanity check - the pile is empty
+            self.assertRaises(StopIteration, pile.next)
+            # pending remains 0
+            self.assertEqual(0, pile._pending)
 
 
 class TestLRUCache(unittest.TestCase):
@@ -4614,26 +4798,26 @@ class TestParseContentDisposition(unittest.TestCase):
 
     def test_basic_content_type(self):
         name, attrs = utils.parse_content_disposition('text/plain')
-        self.assertEquals(name, 'text/plain')
-        self.assertEquals(attrs, {})
+        self.assertEqual(name, 'text/plain')
+        self.assertEqual(attrs, {})
 
     def test_content_type_with_charset(self):
         name, attrs = utils.parse_content_disposition(
             'text/plain; charset=UTF8')
-        self.assertEquals(name, 'text/plain')
-        self.assertEquals(attrs, {'charset': 'UTF8'})
+        self.assertEqual(name, 'text/plain')
+        self.assertEqual(attrs, {'charset': 'UTF8'})
 
     def test_content_disposition(self):
         name, attrs = utils.parse_content_disposition(
             'form-data; name="somefile"; filename="test.html"')
-        self.assertEquals(name, 'form-data')
-        self.assertEquals(attrs, {'name': 'somefile', 'filename': 'test.html'})
+        self.assertEqual(name, 'form-data')
+        self.assertEqual(attrs, {'name': 'somefile', 'filename': 'test.html'})
 
     def test_content_disposition_without_white_space(self):
         name, attrs = utils.parse_content_disposition(
             'form-data;name="somefile";filename="test.html"')
-        self.assertEquals(name, 'form-data')
-        self.assertEquals(attrs, {'name': 'somefile', 'filename': 'test.html'})
+        self.assertEqual(name, 'form-data')
+        self.assertEqual(attrs, {'name': 'somefile', 'filename': 'test.html'})
 
 
 class TestIterMultipartMimeDocuments(unittest.TestCase):
@@ -4642,7 +4826,7 @@ class TestIterMultipartMimeDocuments(unittest.TestCase):
         it = utils.iter_multipart_mime_documents(StringIO('blah'), 'unique')
         exc = None
         try:
-            it.next()
+            next(it)
         except MimeInvalid as err:
             exc = err
         self.assertTrue('invalid starting boundary' in str(exc))
@@ -4651,11 +4835,11 @@ class TestIterMultipartMimeDocuments(unittest.TestCase):
     def test_empty(self):
         it = utils.iter_multipart_mime_documents(StringIO('--unique'),
                                                  'unique')
-        fp = it.next()
-        self.assertEquals(fp.read(), '')
+        fp = next(it)
+        self.assertEqual(fp.read(), '')
         exc = None
         try:
-            it.next()
+            next(it)
         except StopIteration as err:
             exc = err
         self.assertTrue(exc is not None)
@@ -4663,11 +4847,11 @@ class TestIterMultipartMimeDocuments(unittest.TestCase):
     def test_basic(self):
         it = utils.iter_multipart_mime_documents(
             StringIO('--unique\r\nabcdefg\r\n--unique--'), 'unique')
-        fp = it.next()
-        self.assertEquals(fp.read(), 'abcdefg')
+        fp = next(it)
+        self.assertEqual(fp.read(), 'abcdefg')
         exc = None
         try:
-            it.next()
+            next(it)
         except StopIteration as err:
             exc = err
         self.assertTrue(exc is not None)
@@ -4676,13 +4860,13 @@ class TestIterMultipartMimeDocuments(unittest.TestCase):
         it = utils.iter_multipart_mime_documents(
             StringIO('--unique\r\nabcdefg\r\n--unique\r\nhijkl\r\n--unique--'),
             'unique')
-        fp = it.next()
-        self.assertEquals(fp.read(), 'abcdefg')
-        fp = it.next()
-        self.assertEquals(fp.read(), 'hijkl')
+        fp = next(it)
+        self.assertEqual(fp.read(), 'abcdefg')
+        fp = next(it)
+        self.assertEqual(fp.read(), 'hijkl')
         exc = None
         try:
-            it.next()
+            next(it)
         except StopIteration as err:
             exc = err
         self.assertTrue(exc is not None)
@@ -4691,17 +4875,17 @@ class TestIterMultipartMimeDocuments(unittest.TestCase):
         it = utils.iter_multipart_mime_documents(
             StringIO('--unique\r\nabcdefg\r\n--unique\r\nhijkl\r\n--unique--'),
             'unique')
-        fp = it.next()
-        self.assertEquals(fp.read(2), 'ab')
-        self.assertEquals(fp.read(2), 'cd')
-        self.assertEquals(fp.read(2), 'ef')
-        self.assertEquals(fp.read(2), 'g')
-        self.assertEquals(fp.read(2), '')
-        fp = it.next()
-        self.assertEquals(fp.read(), 'hijkl')
+        fp = next(it)
+        self.assertEqual(fp.read(2), 'ab')
+        self.assertEqual(fp.read(2), 'cd')
+        self.assertEqual(fp.read(2), 'ef')
+        self.assertEqual(fp.read(2), 'g')
+        self.assertEqual(fp.read(2), '')
+        fp = next(it)
+        self.assertEqual(fp.read(), 'hijkl')
         exc = None
         try:
-            it.next()
+            next(it)
         except StopIteration as err:
             exc = err
         self.assertTrue(exc is not None)
@@ -4710,28 +4894,40 @@ class TestIterMultipartMimeDocuments(unittest.TestCase):
         it = utils.iter_multipart_mime_documents(
             StringIO('--unique\r\nabcdefg\r\n--unique\r\nhijkl\r\n--unique--'),
             'unique')
-        fp = it.next()
-        self.assertEquals(fp.read(65536), 'abcdefg')
-        self.assertEquals(fp.read(), '')
-        fp = it.next()
-        self.assertEquals(fp.read(), 'hijkl')
+        fp = next(it)
+        self.assertEqual(fp.read(65536), 'abcdefg')
+        self.assertEqual(fp.read(), '')
+        fp = next(it)
+        self.assertEqual(fp.read(), 'hijkl')
         exc = None
         try:
-            it.next()
+            next(it)
         except StopIteration as err:
             exc = err
         self.assertTrue(exc is not None)
+
+    def test_leading_crlfs(self):
+        it = utils.iter_multipart_mime_documents(
+            StringIO('\r\n\r\n\r\n--unique\r\nabcdefg\r\n'
+                     '--unique\r\nhijkl\r\n--unique--'),
+            'unique')
+        fp = next(it)
+        self.assertEqual(fp.read(65536), 'abcdefg')
+        self.assertEqual(fp.read(), '')
+        fp = next(it)
+        self.assertEqual(fp.read(), 'hijkl')
+        self.assertRaises(StopIteration, it.next)
 
     def test_broken_mid_stream(self):
         # We go ahead and accept whatever is sent instead of rejecting the
         # whole request, in case the partial form is still useful.
         it = utils.iter_multipart_mime_documents(
             StringIO('--unique\r\nabc'), 'unique')
-        fp = it.next()
-        self.assertEquals(fp.read(), 'abc')
+        fp = next(it)
+        self.assertEqual(fp.read(), 'abc')
         exc = None
         try:
-            it.next()
+            next(it)
         except StopIteration as err:
             exc = err
         self.assertTrue(exc is not None)
@@ -4740,17 +4936,17 @@ class TestIterMultipartMimeDocuments(unittest.TestCase):
         it = utils.iter_multipart_mime_documents(
             StringIO('--unique\r\nab\r\ncd\ref\ng\r\n--unique\r\nhi\r\n\r\n'
                      'jkl\r\n\r\n--unique--'), 'unique')
-        fp = it.next()
-        self.assertEquals(fp.readline(), 'ab\r\n')
-        self.assertEquals(fp.readline(), 'cd\ref\ng')
-        self.assertEquals(fp.readline(), '')
-        fp = it.next()
-        self.assertEquals(fp.readline(), 'hi\r\n')
-        self.assertEquals(fp.readline(), '\r\n')
-        self.assertEquals(fp.readline(), 'jkl\r\n')
+        fp = next(it)
+        self.assertEqual(fp.readline(), 'ab\r\n')
+        self.assertEqual(fp.readline(), 'cd\ref\ng')
+        self.assertEqual(fp.readline(), '')
+        fp = next(it)
+        self.assertEqual(fp.readline(), 'hi\r\n')
+        self.assertEqual(fp.readline(), '\r\n')
+        self.assertEqual(fp.readline(), 'jkl\r\n')
         exc = None
         try:
-            it.next()
+            next(it)
         except StopIteration as err:
             exc = err
         self.assertTrue(exc is not None)
@@ -4761,20 +4957,200 @@ class TestIterMultipartMimeDocuments(unittest.TestCase):
                      '\r\njkl\r\n\r\n--unique--'),
             'unique',
             read_chunk_size=2)
-        fp = it.next()
-        self.assertEquals(fp.readline(), 'ab\r\n')
-        self.assertEquals(fp.readline(), 'cd\ref\ng')
-        self.assertEquals(fp.readline(), '')
-        fp = it.next()
-        self.assertEquals(fp.readline(), 'hi\r\n')
-        self.assertEquals(fp.readline(), '\r\n')
-        self.assertEquals(fp.readline(), 'jkl\r\n')
+        fp = next(it)
+        self.assertEqual(fp.readline(), 'ab\r\n')
+        self.assertEqual(fp.readline(), 'cd\ref\ng')
+        self.assertEqual(fp.readline(), '')
+        fp = next(it)
+        self.assertEqual(fp.readline(), 'hi\r\n')
+        self.assertEqual(fp.readline(), '\r\n')
+        self.assertEqual(fp.readline(), 'jkl\r\n')
         exc = None
         try:
-            it.next()
+            next(it)
         except StopIteration as err:
             exc = err
         self.assertTrue(exc is not None)
+
+
+class TestParseMimeHeaders(unittest.TestCase):
+
+    def test_parse_mime_headers(self):
+        doc_file = BytesIO(b"""Content-Disposition: form-data; name="file_size"
+Foo: Bar
+NOT-title-cAsED: quux
+Connexion: =?iso8859-1?q?r=E9initialis=E9e_par_l=27homologue?=
+Status: =?utf-8?b?5byA5aeL6YCa6L+H5a+56LGh5aSN5Yi2?=
+Latin-1: Resincronizaci\xf3n realizada con \xe9xito
+Utf-8: \xd0\xba\xd0\xbe\xd0\xbd\xd1\x82\xd0\xb5\xd0\xb9\xd0\xbd\xd0\xb5\xd1\x80
+
+This is the body
+""")
+        headers = utils.parse_mime_headers(doc_file)
+        expected_headers = {
+            'Content-Disposition': 'form-data; name="file_size"',
+            'Foo': "Bar",
+            'Not-Title-Cased': "quux",
+            # Encoded-word or non-ASCII values are treated just like any other
+            # bytestring (at least for now)
+            'Connexion': "=?iso8859-1?q?r=E9initialis=E9e_par_l=27homologue?=",
+            'Status': "=?utf-8?b?5byA5aeL6YCa6L+H5a+56LGh5aSN5Yi2?=",
+            'Latin-1': "Resincronizaci\xf3n realizada con \xe9xito",
+            'Utf-8': ("\xd0\xba\xd0\xbe\xd0\xbd\xd1\x82\xd0\xb5\xd0\xb9\xd0"
+                      "\xbd\xd0\xb5\xd1\x80")
+        }
+        self.assertEqual(expected_headers, headers)
+        self.assertEqual(b"This is the body\n", doc_file.read())
+
+
+class FakeResponse(object):
+    def __init__(self, status, headers, body):
+        self.status = status
+        self.headers = HeaderKeyDict(headers)
+        self.body = StringIO(body)
+
+    def getheader(self, header_name):
+        return str(self.headers.get(header_name, ''))
+
+    def getheaders(self):
+        return self.headers.items()
+
+    def read(self, length=None):
+        return self.body.read(length)
+
+    def readline(self, length=None):
+        return self.body.readline(length)
+
+
+class TestHTTPResponseToDocumentIters(unittest.TestCase):
+    def test_200(self):
+        fr = FakeResponse(
+            200,
+            {'Content-Length': '10', 'Content-Type': 'application/lunch'},
+            'sandwiches')
+
+        doc_iters = utils.http_response_to_document_iters(fr)
+        first_byte, last_byte, length, headers, body = next(doc_iters)
+        self.assertEqual(first_byte, 0)
+        self.assertEqual(last_byte, 9)
+        self.assertEqual(length, 10)
+        header_dict = HeaderKeyDict(headers)
+        self.assertEqual(header_dict.get('Content-Length'), '10')
+        self.assertEqual(header_dict.get('Content-Type'), 'application/lunch')
+        self.assertEqual(body.read(), 'sandwiches')
+
+        self.assertRaises(StopIteration, next, doc_iters)
+
+    def test_206_single_range(self):
+        fr = FakeResponse(
+            206,
+            {'Content-Length': '8', 'Content-Type': 'application/lunch',
+             'Content-Range': 'bytes 1-8/10'},
+            'andwiche')
+
+        doc_iters = utils.http_response_to_document_iters(fr)
+        first_byte, last_byte, length, headers, body = next(doc_iters)
+        self.assertEqual(first_byte, 1)
+        self.assertEqual(last_byte, 8)
+        self.assertEqual(length, 10)
+        header_dict = HeaderKeyDict(headers)
+        self.assertEqual(header_dict.get('Content-Length'), '8')
+        self.assertEqual(header_dict.get('Content-Type'), 'application/lunch')
+        self.assertEqual(body.read(), 'andwiche')
+
+        self.assertRaises(StopIteration, next, doc_iters)
+
+    def test_206_multiple_ranges(self):
+        fr = FakeResponse(
+            206,
+            {'Content-Type': 'multipart/byteranges; boundary=asdfasdfasdf'},
+            ("--asdfasdfasdf\r\n"
+             "Content-Type: application/lunch\r\n"
+             "Content-Range: bytes 0-3/10\r\n"
+             "\r\n"
+             "sand\r\n"
+             "--asdfasdfasdf\r\n"
+             "Content-Type: application/lunch\r\n"
+             "Content-Range: bytes 6-9/10\r\n"
+             "\r\n"
+             "ches\r\n"
+             "--asdfasdfasdf--"))
+
+        doc_iters = utils.http_response_to_document_iters(fr)
+
+        first_byte, last_byte, length, headers, body = next(doc_iters)
+        self.assertEqual(first_byte, 0)
+        self.assertEqual(last_byte, 3)
+        self.assertEqual(length, 10)
+        header_dict = HeaderKeyDict(headers)
+        self.assertEqual(header_dict.get('Content-Type'), 'application/lunch')
+        self.assertEqual(body.read(), 'sand')
+
+        first_byte, last_byte, length, headers, body = next(doc_iters)
+        self.assertEqual(first_byte, 6)
+        self.assertEqual(last_byte, 9)
+        self.assertEqual(length, 10)
+        header_dict = HeaderKeyDict(headers)
+        self.assertEqual(header_dict.get('Content-Type'), 'application/lunch')
+        self.assertEqual(body.read(), 'ches')
+
+        self.assertRaises(StopIteration, next, doc_iters)
+
+
+class TestDocumentItersToHTTPResponseBody(unittest.TestCase):
+    def test_no_parts(self):
+        body = utils.document_iters_to_http_response_body(
+            iter([]), 'dontcare',
+            multipart=False, logger=FakeLogger())
+        self.assertEqual(body, '')
+
+    def test_single_part(self):
+        body = "time flies like an arrow; fruit flies like a banana"
+        doc_iters = [{'part_iter': iter(StringIO(body).read, '')}]
+
+        resp_body = ''.join(
+            utils.document_iters_to_http_response_body(
+                iter(doc_iters), 'dontcare',
+                multipart=False, logger=FakeLogger()))
+        self.assertEqual(resp_body, body)
+
+    def test_multiple_parts(self):
+        part1 = "two peanuts were walking down a railroad track"
+        part2 = "and one was a salted. ... peanut."
+
+        doc_iters = [{
+            'start_byte': 88,
+            'end_byte': 133,
+            'content_type': 'application/peanut',
+            'entity_length': 1024,
+            'part_iter': iter(StringIO(part1).read, ''),
+        }, {
+            'start_byte': 500,
+            'end_byte': 532,
+            'content_type': 'application/salted',
+            'entity_length': 1024,
+            'part_iter': iter(StringIO(part2).read, ''),
+        }]
+
+        resp_body = ''.join(
+            utils.document_iters_to_http_response_body(
+                iter(doc_iters), 'boundaryboundary',
+                multipart=True, logger=FakeLogger()))
+        self.assertEqual(resp_body, (
+            "--boundaryboundary\r\n" +
+            # This is a little too strict; we don't actually care that the
+            # headers are in this order, but the test is much more legible
+            # this way.
+            "Content-Type: application/peanut\r\n" +
+            "Content-Range: bytes 88-133/1024\r\n" +
+            "\r\n" +
+            part1 + "\r\n" +
+            "--boundaryboundary\r\n"
+            "Content-Type: application/salted\r\n" +
+            "Content-Range: bytes 500-532/1024\r\n" +
+            "\r\n" +
+            part2 + "\r\n" +
+            "--boundaryboundary--"))
 
 
 class TestPairs(unittest.TestCase):

@@ -15,31 +15,32 @@
 
 """ Object Server for Swift """
 
-import cPickle as pickle
+import six.moves.cPickle as pickle
 import json
 import os
 import multiprocessing
 import time
 import traceback
-import rfc822
 import socket
 import math
 from swift import gettext_ as _
 from hashlib import md5
 
 from eventlet import sleep, wsgi, Timeout
+from eventlet.greenthread import spawn
 
 from swift.common.utils import public, get_logger, \
     config_true_value, timing_stats, replication, \
     normalize_delete_at_timestamp, get_log_line, Timestamp, \
-    get_expirer_container, iter_multipart_mime_documents
+    get_expirer_container, parse_mime_headers, \
+    iter_multipart_mime_documents
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, \
     valid_timestamp, check_utf8
 from swift.common.exceptions import ConnectionTimeout, DiskFileQuarantined, \
     DiskFileNotExist, DiskFileCollision, DiskFileNoSpace, DiskFileDeleted, \
     DiskFileDeviceUnavailable, DiskFileExpired, ChunkReadTimeout, \
-    DiskFileXattrNotSupported
+    ChunkReadError, DiskFileXattrNotSupported
 from swift.obj import ssync_receiver
 from swift.common.http import is_success
 from swift.common.base_storage_server import BaseStorageServer
@@ -59,7 +60,7 @@ def iter_mime_headers_and_bodies(wsgi_input, mime_boundary, read_chunk_size):
         wsgi_input, mime_boundary, read_chunk_size)
 
     for file_like in mime_documents_iter:
-        hdrs = HeaderKeyDict(rfc822.Message(file_like, 0))
+        hdrs = parse_mime_headers(file_like)
         yield (hdrs, file_like)
 
 
@@ -108,7 +109,9 @@ class ObjectController(BaseStorageServer):
         """
         super(ObjectController, self).__init__(conf)
         self.logger = logger or get_logger(conf, log_route='object-server')
-        self.node_timeout = int(conf.get('node_timeout', 3))
+        self.node_timeout = float(conf.get('node_timeout', 3))
+        self.container_update_timeout = float(
+            conf.get('container_update_timeout', 1))
         self.conn_timeout = float(conf.get('conn_timeout', 0.5))
         self.client_timeout = int(conf.get('client_timeout', 60))
         self.disk_chunk_size = int(conf.get('disk_chunk_size', 65536))
@@ -198,7 +201,8 @@ class ObjectController(BaseStorageServer):
             device, partition, account, container, obj, policy, **kwargs)
 
     def async_update(self, op, account, container, obj, host, partition,
-                     contdevice, headers_out, objdevice, policy):
+                     contdevice, headers_out, objdevice, policy,
+                     logger_thread_locals=None):
         """
         Sends or saves an async update.
 
@@ -213,7 +217,12 @@ class ObjectController(BaseStorageServer):
                             request
         :param objdevice: device name that the object is in
         :param policy: the associated BaseStoragePolicy instance
+        :param logger_thread_locals: The thread local values to be set on the
+                                     self.logger to retain transaction
+                                     logging information.
         """
+        if logger_thread_locals:
+            self.logger.thread_locals = logger_thread_locals
         headers_out['user-agent'] = 'object-server %s' % os.getpid()
         full_path = '/%s/%s/%s' % (account, container, obj)
         if all([host, partition, contdevice]):
@@ -285,10 +294,28 @@ class ObjectController(BaseStorageServer):
         headers_out['x-trans-id'] = headers_in.get('x-trans-id', '-')
         headers_out['referer'] = request.as_referer()
         headers_out['X-Backend-Storage-Policy-Index'] = int(policy)
+        update_greenthreads = []
         for conthost, contdevice in updates:
-            self.async_update(op, account, container, obj, conthost,
-                              contpartition, contdevice, headers_out,
-                              objdevice, policy)
+            gt = spawn(self.async_update, op, account, container, obj,
+                       conthost, contpartition, contdevice, headers_out,
+                       objdevice, policy,
+                       logger_thread_locals=self.logger.thread_locals)
+            update_greenthreads.append(gt)
+        # Wait a little bit to see if the container updates are successful.
+        # If we immediately return after firing off the greenthread above, then
+        # we're more likely to confuse the end-user who does a listing right
+        # after getting a successful response to the object create. The
+        # `container_update_timeout` bounds the length of time we wait so that
+        # one slow container server doesn't make the entire request lag.
+        try:
+            with Timeout(self.container_update_timeout):
+                for gt in update_greenthreads:
+                    gt.wait()
+        except Timeout:
+            # updates didn't go through, log it and return
+            self.logger.debug(
+                'Container update timeout (%.4fs) waiting for %s',
+                self.container_update_timeout, updates)
 
     def delete_at_update(self, op, delete_at, account, container, obj,
                          request, objdevice, policy):
@@ -378,8 +405,10 @@ class ObjectController(BaseStorageServer):
                 if commit_hdrs.get('X-Document', None) == "put commit":
                     rcvd_commit = True
             drain(commit_iter, self.network_chunk_size, self.client_timeout)
-        except ChunkReadTimeout:
+        except ChunkReadError:
             raise HTTPClientDisconnect()
+        except ChunkReadTimeout:
+            raise HTTPRequestTimeout()
         except StopIteration:
             raise HTTPBadRequest(body="couldn't find PUT commit MIME doc")
         return rcvd_commit
@@ -388,16 +417,20 @@ class ObjectController(BaseStorageServer):
         try:
             with ChunkReadTimeout(self.client_timeout):
                 footer_hdrs, footer_iter = next(mime_documents_iter)
-        except ChunkReadTimeout:
+        except ChunkReadError:
             raise HTTPClientDisconnect()
+        except ChunkReadTimeout:
+            raise HTTPRequestTimeout()
         except StopIteration:
             raise HTTPBadRequest(body="couldn't find footer MIME doc")
 
         timeout_reader = self._make_timeout_reader(footer_iter)
         try:
             footer_body = ''.join(iter(timeout_reader, ''))
-        except ChunkReadTimeout:
+        except ChunkReadError:
             raise HTTPClientDisconnect()
+        except ChunkReadTimeout:
+            raise HTTPRequestTimeout()
 
         footer_md5 = footer_hdrs.get('Content-MD5')
         if not footer_md5:
@@ -411,11 +444,16 @@ class ObjectController(BaseStorageServer):
             raise HTTPBadRequest("invalid JSON for footer doc")
 
     def _check_container_override(self, update_headers, metadata):
-        for key, val in metadata.iteritems():
+        for key, val in metadata.items():
             override_prefix = 'x-backend-container-update-override-'
             if key.lower().startswith(override_prefix):
                 override = key.lower().replace(override_prefix, 'x-')
                 update_headers[override] = val
+
+    def _preserve_slo_manifest(self, update_metadata, orig_metadata):
+        if 'X-Static-Large-Object' in orig_metadata:
+            update_metadata['X-Static-Large-Object'] = \
+                orig_metadata['X-Static-Large-Object']
 
     @public
     @timing_stats()
@@ -446,9 +484,14 @@ class ObjectController(BaseStorageServer):
                 request=request,
                 headers={'X-Backend-Timestamp': orig_timestamp.internal})
         metadata = {'X-Timestamp': req_timestamp.internal}
-        metadata.update(val for val in request.headers.iteritems()
+        self._preserve_slo_manifest(metadata, orig_metadata)
+        metadata.update(val for val in request.headers.items()
                         if is_user_meta('object', val[0]))
-        for header_key in self.allowed_headers:
+        headers_to_copy = (
+            request.headers.get(
+                'X-Backend-Replication-Headers', '').split() +
+            list(self.allowed_headers))
+        for header_key in headers_to_copy:
             if header_key in request.headers:
                 header_caps = header_key.title()
                 metadata[header_caps] = request.headers[header_key]
@@ -498,18 +541,24 @@ class ObjectController(BaseStorageServer):
                 except ValueError as e:
                     return HTTPBadRequest(body=str(e), request=request,
                                           content_type='text/plain')
+        # SSYNC will include Frag-Index header for subrequests to primary
+        # nodes; handoff nodes should 409 subrequests to over-write an
+        # existing data fragment until they offloaded the existing fragment
+        frag_index = request.headers.get('X-Backend-Ssync-Frag-Index')
         try:
             disk_file = self.get_diskfile(
                 device, partition, account, container, obj,
-                policy=policy)
+                policy=policy, frag_index=frag_index)
         except DiskFileDeviceUnavailable:
             return HTTPInsufficientStorage(drive=device, request=request)
         try:
             orig_metadata = disk_file.read_metadata()
+            orig_timestamp = disk_file.data_timestamp
         except DiskFileXattrNotSupported:
             return HTTPInsufficientStorage(drive=device, request=request)
         except (DiskFileNotExist, DiskFileQuarantined):
             orig_metadata = {}
+            orig_timestamp = 0
 
         # Checks for If-None-Match
         if request.if_none_match is not None and orig_metadata:
@@ -520,7 +569,6 @@ class ObjectController(BaseStorageServer):
                 # The current ETag matches, so return 412
                 return HTTPPreconditionFailed(request=request)
 
-        orig_timestamp = Timestamp(orig_metadata.get('X-Timestamp', 0))
         if orig_timestamp >= req_timestamp:
             return HTTPConflict(
                 request=request,
@@ -572,6 +620,8 @@ class ObjectController(BaseStorageServer):
                                 request.environ['wsgi.input'],
                                 mime_boundary, self.network_chunk_size)
                             _junk_hdrs, obj_input = next(mime_documents_iter)
+                    except ChunkReadError:
+                        return HTTPClientDisconnect(request=request)
                     except ChunkReadTimeout:
                         return HTTPRequestTimeout(request=request)
 
@@ -585,6 +635,8 @@ class ObjectController(BaseStorageServer):
                         etag.update(chunk)
                         upload_size = writer.write(chunk)
                         elapsed_time += time.time() - start_time
+                except ChunkReadError:
+                    return HTTPClientDisconnect(request=request)
                 except ChunkReadTimeout:
                     return HTTPRequestTimeout(request=request)
                 if upload_size:
@@ -610,9 +662,9 @@ class ObjectController(BaseStorageServer):
                     'ETag': etag,
                     'Content-Length': str(upload_size),
                 }
-                metadata.update(val for val in request.headers.iteritems()
+                metadata.update(val for val in request.headers.items()
                                 if is_sys_or_user_meta('object', val[0]))
-                metadata.update(val for val in footer_meta.iteritems()
+                metadata.update(val for val in footer_meta.items()
                                 if is_sys_or_user_meta('object', val[0]))
                 headers_to_copy = (
                     request.headers.get(
@@ -645,8 +697,10 @@ class ObjectController(BaseStorageServer):
                             _junk_hdrs, _junk_body = next(mime_documents_iter)
                         drain(_junk_body, self.network_chunk_size,
                               self.client_timeout)
-                except ChunkReadTimeout:
+                except ChunkReadError:
                     raise HTTPClientDisconnect()
+                except ChunkReadTimeout:
+                    raise HTTPRequestTimeout()
                 except StopIteration:
                     pass
 
@@ -681,9 +735,6 @@ class ObjectController(BaseStorageServer):
         """Handle HTTP GET requests for the Swift Object Server."""
         device, partition, account, container, obj, policy = \
             get_name_and_placement(request, 5, 5, True)
-        keep_cache = self.keep_cache_private or (
-            'X-Auth-Token' not in request.headers and
-            'X-Storage-Token' not in request.headers)
         try:
             disk_file = self.get_diskfile(
                 device, partition, account, container, obj,
@@ -708,7 +759,7 @@ class ObjectController(BaseStorageServer):
                     conditional_etag=conditional_etag)
                 response.headers['Content-Type'] = metadata.get(
                     'Content-Type', 'application/octet-stream')
-                for key, value in metadata.iteritems():
+                for key, value in metadata.items():
                     if is_sys_or_user_meta('object', key) or \
                             key.lower() in self.allowed_headers:
                         response.headers[key] = value
@@ -763,7 +814,7 @@ class ObjectController(BaseStorageServer):
                             conditional_etag=conditional_etag)
         response.headers['Content-Type'] = metadata.get(
             'Content-Type', 'application/octet-stream')
-        for key, value in metadata.iteritems():
+        for key, value in metadata.items():
             if is_sys_or_user_meta('object', key) or \
                     key.lower() in self.allowed_headers:
                 response.headers[key] = value
@@ -810,7 +861,7 @@ class ObjectController(BaseStorageServer):
             orig_metadata = {}
             response_class = HTTPNotFound
         else:
-            orig_timestamp = Timestamp(orig_metadata.get('X-Timestamp', 0))
+            orig_timestamp = disk_file.data_timestamp
             if orig_timestamp < req_timestamp:
                 response_class = HTTPNoContent
             else:

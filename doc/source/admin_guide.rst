@@ -110,8 +110,8 @@ You can create scripts to create the account and container rings and rebalance. 
     cd /etc/swift
     rm -f account.builder account.ring.gz backups/account.builder backups/account.ring.gz
     swift-ring-builder account.builder create 18 3 1
-    swift-ring-builder account.builder add z1-<account-server-1>:6002/sdb1 1
-    swift-ring-builder account.builder add z2-<account-server-2>:6002/sdb1 1
+    swift-ring-builder account.builder add r1z1-<account-server-1>:6002/sdb1 1
+    swift-ring-builder account.builder add r1z2-<account-server-2>:6002/sdb1 1
     swift-ring-builder account.builder rebalance
 
    You need to replace the values of <account-server-1>,
@@ -121,7 +121,8 @@ You can create scripts to create the account and container rings and rebalance. 
    6002, and have a storage device called "sdb1" (this is a directory
    name created under /drives when we setup the account server). The
    "z1", "z2", etc. designate zones, and you can choose whether you
-   put devices in the same or different zones.
+   put devices in the same or different zones. The "r1" designates
+   the region, with different regions specified as "r1", "r2", etc.
 
 2. Make the script file executable and run it to create the account ring file::
 
@@ -153,6 +154,10 @@ is unmounted.  This will make it easier for swift to work around the failure
 until it has been resolved.  If the drive is going to be replaced immediately,
 then it is just best to replace the drive, format it, remount it, and let
 replication fill it up.
+
+After the drive is unmounted, make sure the mount point is owned by root
+(root:root 755). This ensures that rsync will not try to replicate into the
+root drive once the failed drive is unmounted.
 
 If the drive can't be replaced immediately, then it is best to leave it
 unmounted, and set the device weight to 0. This will allow all the
@@ -270,7 +275,8 @@ configuration file, /etc/swift/dispersion.conf. Example conf file::
 
 There are also options for the conf file for specifying the dispersion coverage
 (defaults to 1%), retries, concurrency, etc. though usually the defaults are
-fine.
+fine. If you want to use keystone v3 for authentication there are options like
+auth_version, user_domain_name, project_domain_name and project_name.
 
 Once the configuration is in place, run `swift-dispersion-populate` to populate
 the containers and objects throughout the cluster.
@@ -339,6 +345,12 @@ allows it to be more easily consumed by third party utilities::
     $ swift-dispersion-report -j
     {"object": {"retries:": 0, "missing_two": 0, "copies_found": 7863, "missing_one": 0, "copies_expected": 7863, "pct_found": 100.0, "overlapping": 0, "missing_all": 0}, "container": {"retries:": 0, "missing_two": 0, "copies_found": 12534, "missing_one": 0, "copies_expected": 12534, "pct_found": 100.0, "overlapping": 15, "missing_all": 0}}
 
+Note that you may select which storage policy to use by setting the option
+'--policy-name silver' or '-P silver' (silver is the example policy name here).
+If no policy is specified, the default will be used per the swift.conf file.
+When you specify a policy the containers created also include the policy index,
+thus even when running a container_only report, you will need to specify the
+policy not using the default.
 
 -----------------------------------
 Geographically Distributed Clusters
@@ -538,18 +550,22 @@ Request URI                 Description
 /recon/sockstat             returns consumable info from /proc/net/sockstat|6
 /recon/devices              returns list of devices and devices dir i.e. /srv/node
 /recon/async                returns count of async pending
-/recon/replication          returns object replication times (for backward compatibility)
+/recon/replication          returns object replication info (for backward compatibility)
 /recon/replication/<type>   returns replication info for given type (account, container, object)
 /recon/auditor/<type>       returns auditor stats on last reported scan for given type (account, container, object)
 /recon/updater/<type>       returns last updater sweep times for given type (container, object)
 =========================   ========================================================================================
+
+Note that 'object_replication_last' and 'object_replication_time' in object
+replication info are considered to be transitional and will be removed in
+the subsequent releases. Use 'replication_last' and 'replication_time' instead.
 
 This information can also be queried via the swift-recon command line utility::
 
     fhines@ubuntu:~$ swift-recon -h
     Usage:
             usage: swift-recon <server_type> [-v] [--suppress] [-a] [-r] [-u] [-d]
-            [-l] [--md5] [--auditor] [--updater] [--expirer] [--sockstat]
+            [-l] [-T] [--md5] [--auditor] [--updater] [--expirer] [--sockstat]
 
             <server_type>   account|container|object
             Defaults to object server.
@@ -572,7 +588,8 @@ This information can also be queried via the swift-recon command line utility::
       -q, --quarantined     Get cluster quarantine stats
       --md5                 Get md5sum of servers ring and compare to local copy
       --sockstat            Get cluster socket usage stats
-      --all                 Perform all checks. Equal to -arudlq --md5 --sockstat
+      -T, --time            Check time synchronization
+      --all                 Perform all checks. Equal to -arudlqT --md5 --sockstat
       -z ZONE, --zone=ZONE  Only query servers in specified zone
       -t SECONDS, --timeout=SECONDS
                             Time to wait for a response from a server
@@ -1049,7 +1066,7 @@ proxy-server controller responsible for the request: "account", "container",
 middleware.  The `<verb>` portion will be one of "GET", "HEAD", "POST", "PUT",
 "DELETE", "COPY", "OPTIONS", or "BAD_METHOD".  The list of valid HTTP methods
 is configurable via the `log_statsd_valid_http_methods` config variable and
-the default setting yields the above behavior.
+the default setting yields the above behavior):
 
 .. _Swift Origin Server: https://github.com/dpgoetz/sos
 
@@ -1070,6 +1087,21 @@ Metric Name                                           Description
                                                       and <status> portions of the metric are just
                                                       like the main timing metric.
 ====================================================  ============================================
+
+The `proxy-logging` middleware also groups these metrics by policy.  The
+`<policy-index>` portion represents a policy index):
+
+==========================================================================  =====================================
+Metric Name                                                                 Description
+--------------------------------------------------------------------------  -------------------------------------
+`proxy-server.object.policy.<policy-index>.<verb>.<status>.timing`          Timing data for requests, aggregated
+                                                                            by policy index.
+`proxy-server.object.policy.<policy-index>.GET.<status>.first-byte.timing`  Timing data up to completion of
+                                                                            sending the response headers,
+                                                                            aggregated by policy index.
+`proxy-server.object.policy.<policy-index>.<verb>.<status>.xfer`            Sum of bytes transferred in and out,
+                                                                            aggregated by policy index.
+==========================================================================  =====================================
 
 Metrics for `tempauth` middleware (in the table, `<reseller_prefix>` represents
 the actual configured reseller_prefix or "`NONE`" if the reseller_prefix is the

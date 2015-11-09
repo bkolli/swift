@@ -20,11 +20,15 @@ import itertools
 import logging
 import math
 import random
-import cPickle as pickle
+import six.moves.cPickle as pickle
 from copy import deepcopy
+from contextlib import contextmanager
+import warnings
 
 from array import array
 from collections import defaultdict
+import six
+from six.moves import range
 from time import time
 
 from swift.common import exceptions
@@ -33,6 +37,10 @@ from swift.common.ring.utils import tiers_for_dev, build_tier_tree, \
     validate_and_normalize_address
 
 MAX_BALANCE = 999.99
+
+
+class RingValidationWarning(Warning):
+    pass
 
 
 try:
@@ -80,6 +88,7 @@ class RingBuilder(object):
         self.devs_changed = False
         self.version = 0
         self.overload = 0.0
+        self._effective_overload = None
 
         # _replica2part2dev maps from replica number to partition number to
         # device id. So, for a three replica, 2**23 ring, it's an array of
@@ -110,8 +119,23 @@ class RingBuilder(object):
 
         self.logger = logging.getLogger("swift.ring.builder")
         if not self.logger.handlers:
+            self.logger.disabled = True
             # silence "no handler for X" error messages
             self.logger.addHandler(NullHandler())
+
+    @contextmanager
+    def debug(self):
+        """
+        Temporarily enables debug logging, useful in tests, e.g.
+
+            with rb.debug():
+                rb.rebalance()
+        """
+        self.logger.disabled = False
+        try:
+            yield
+        finally:
+            self.logger.disabled = True
 
     def weight_of_one_part(self):
         """
@@ -372,12 +396,30 @@ class RingBuilder(object):
         below 1% or doesn't change by more than 1% (only happens with ring that
         can't be balanced no matter what).
 
-        :returns: (number_of_partitions_altered, resulting_balance)
+        :returns: (number_of_partitions_altered, resulting_balance,
+                   number_of_removed_devices)
         """
+        num_devices = len([d for d in self._iter_devs() if d['weight'] > 0])
+        removed_devs = 0
+        if num_devices < self.replicas:
+            warnings.warn(RingValidationWarning(
+                "Replica count of %(replicas)s requires more "
+                "than %(num_devices)s devices" % {
+                    'replicas': self.replicas,
+                    'num_devices': num_devices,
+                }))
         old_replica2part2dev = copy.deepcopy(self._replica2part2dev)
 
         if seed is not None:
             random.seed(seed)
+
+        self._effective_overload = self.overload
+        if self.overload and self.dispersion <= 0:
+            # iff we're fully dispersed we want to bring in overload
+            self._effective_overload = min(self.overload,
+                                           self.get_required_overload())
+        self.logger.debug("Using effective overload of %f",
+                          self._effective_overload)
 
         self._ring = None
         if self._last_part_moves_epoch is None:
@@ -385,7 +427,7 @@ class RingBuilder(object):
             self._initial_balance()
             self.devs_changed = False
             self._build_dispersion_graph()
-            return self.parts, self.get_balance()
+            return self.parts, self.get_balance(), removed_devs
         changed_parts = 0
         self._update_last_part_moves()
         last_balance = 0
@@ -400,13 +442,15 @@ class RingBuilder(object):
         while True:
             reassign_parts = self._gather_reassign_parts()
             changed_parts += len(reassign_parts)
-            self.logger.debug("Gathered %d parts", changed_parts)
+            self.logger.debug("Gathered %d parts thus far (%d this pass)",
+                              changed_parts, len(reassign_parts))
             self._reassign_parts(reassign_parts)
             self.logger.debug("Assigned %d parts", changed_parts)
             while self._remove_devs:
                 remove_dev_id = self._remove_devs.pop()['id']
                 self.logger.debug("Removing dev %d", remove_dev_id)
                 self.devs[remove_dev_id] = None
+                removed_devs += 1
             balance = self.get_balance()
             if balance < 1 or abs(last_balance - balance) < 1 or \
                     changed_parts == self.parts:
@@ -416,7 +460,7 @@ class RingBuilder(object):
         self.version += 1
 
         changed_parts = self._build_dispersion_graph(old_replica2part2dev)
-        return changed_parts, balance
+        return changed_parts, balance, removed_devs
 
     def _build_dispersion_graph(self, old_replica2part2dev=None):
         """
@@ -461,7 +505,7 @@ class RingBuilder(object):
         dispersion_graph = {}
         # go over all the devices holding each replica part by part
         for part_id, dev_ids in enumerate(
-                itertools.izip(*self._replica2part2dev)):
+                six.moves.zip(*self._replica2part2dev)):
             # count the number of replicas of this part for each tier of each
             # device, some devices may have overlapping tiers!
             replicas_at_tier = defaultdict(int)
@@ -534,24 +578,48 @@ class RingBuilder(object):
         if stats:
             # dev_usage[dev_id] will equal the number of partitions assigned to
             # that device.
-            dev_usage = array('I', (0 for _junk in xrange(dev_len)))
+            dev_usage = array('I', (0 for _junk in range(dev_len)))
             for part2dev in self._replica2part2dev:
                 for dev_id in part2dev:
                     dev_usage[dev_id] += 1
-
-        for part, replica in self._each_part_replica():
-            dev_id = self._replica2part2dev[replica][part]
-            if dev_id >= dev_len or not self.devs[dev_id]:
-                raise exceptions.RingValidationError(
-                    "Partition %d, replica %d was not allocated "
-                    "to a device." %
-                    (part, replica))
 
         for dev in self._iter_devs():
             if not isinstance(dev['port'], int):
                 raise exceptions.RingValidationError(
                     "Device %d has port %r, which is not an integer." %
                     (dev['id'], dev['port']))
+
+        int_replicas = int(math.ceil(self.replicas))
+        rep2part_len = map(len, self._replica2part2dev)
+        # check the assignments of each part's replicas
+        for part in range(self.parts):
+            devs_for_part = []
+            for replica, part_len in enumerate(rep2part_len):
+                if part_len <= part:
+                    # last replica may be short on parts because of floating
+                    # replica count
+                    if replica + 1 < int_replicas:
+                        raise exceptions.RingValidationError(
+                            "The partition assignments of replica %r were "
+                            "shorter than expected (%s < %s) - this should "
+                            "only happen for the last replica" % (
+                                replica,
+                                len(self._replica2part2dev[replica]),
+                                self.parts,
+                            ))
+                    break
+                dev_id = self._replica2part2dev[replica][part]
+                if dev_id >= dev_len or not self.devs[dev_id]:
+                    raise exceptions.RingValidationError(
+                        "Partition %d, replica %d was not allocated "
+                        "to a device." %
+                        (part, replica))
+                devs_for_part.append(dev_id)
+            if len(devs_for_part) != len(set(devs_for_part)):
+                warnings.warn(RingValidationWarning(
+                    "The partition %s has been assigned to "
+                    "duplicate devices %r" % (
+                        part, devs_for_part)))
 
         if stats:
             weight_of_one_part = self.weight_of_one_part()
@@ -601,13 +669,158 @@ class RingBuilder(object):
                 balance = dev_balance
         return balance
 
+    def get_required_overload(self):
+        """
+        Returns the minimum overload value required to make the ring maximally
+        dispersed.
+        """
+        self.logger.debug("computing required overload")
+        tfd, sibling_tiers = self._compute_sibling_tiers()
+        max_allowed_replicas = self._build_max_replicas_by_tier()
+
+        # We're computing a bunch of different things here, but iterating
+        # over all the devs once is more efficient than doing it a bunch of
+        # times.
+        all_tiers = set([()])
+        tier_weight = defaultdict(float)
+        total_weight = 0.0
+        tier2children = defaultdict(set)
+        for dev in self._iter_devs():
+            dev_weight = dev['weight']
+            total_weight += dev_weight
+            for tier in tfd[dev['id']]:
+                all_tiers.add(tier)
+                tier_weight[tier] += dev_weight
+                tier2children[tier[:-1]].add(tier)
+        tier_weight[()] = total_weight
+
+        max_required_overload = 0.0
+        for tier in all_tiers:
+            if tier not in tier2children:
+                continue
+            if tier_weight[tier] <= 0:
+                continue
+            # Example 1: Consider a 3-replica cluster with 2 regions. If one
+            # region has more than 2/3 the total weight, then (ignoring
+            # overload) some partitions will reside entirely in the big
+            # region.
+            #
+            # Example 2: Consider a 3-replica cluster with 3 regions. If any
+            # region has more than 1/3 the total weight, some partitions will
+            # not have replicas spread across all regions.
+            #
+            # Example 3: Consider a 3-replica cluster with 4 regions. If any
+            # region has more than 1/3 the total weight, some partitions will
+            # not have replicas spread across all regions.
+            #
+            # Example 4: Consider a 3-replica cluster with 100 regions. If
+            # any region has more than 1/3 the total weight, some partitions
+            # will not have replicas spread across all regions. The fact
+            # that there's 100 regions doesn't matter; if one region is big
+            # enough, it'll get multiple replicas of some partitions.
+            #
+            # Example 5: Consider a 5-replica cluster with 2 regions. If the
+            # bigger region has more than 3/5 the weight, some partitions
+            # will have more than 3 replicas in the big region. (Optimal
+            # dispersion is 3 replicas in some region and 2 in the other; 4
+            # and 1 is not good enough.)
+            #
+            # In general, what we do is split this tier's child tiers
+            # into two groups: "big" and "small". "Big" child tiers are
+            # ones whose weight exceeds their fraction of the replicas.
+            # For example, given 3 replicas and 4 zones of total weight
+            # 12,000, a zone with weight greater than 1/3 of 12,000 (=
+            # 4,000) would be considered big. "Small" child tiers are
+            # those which are not big.
+            #
+            # Once we've divided the child tiers into big and small, we
+            # figure out how many replicas should wind up on the small
+            # child tiers (all together), and then compute the needed
+            # overload factor to boost their weights so they can take
+            # that many replicas.
+            child_tiers = tier2children[tier]
+            tier_replicas = max_allowed_replicas[tier]
+            big_child_count = small_child_count = 0
+            big_child_weight = small_child_weight = 0.0
+
+            max_child_replicas = math.ceil(tier_replicas / len(child_tiers))
+            bigness_threshold = (
+                max_child_replicas / tier_replicas * tier_weight[tier])
+
+            for child_tier in child_tiers:
+                child_weight = tier_weight[child_tier]
+                if child_weight == 0:
+                    # If it's got 0 weight, it's not taking any
+                    # partitions at all, so it doesn't count.
+                    continue
+                if child_weight >= bigness_threshold:
+                    big_child_count += 1
+                    big_child_weight += child_weight
+                else:
+                    small_child_count += 1
+                    small_child_weight += child_weight
+
+            if big_child_count == 0 or small_child_count == 0:
+                # We only need overload if we have both big and small
+                # tiers. Usually, all small tiers means things can
+                # balance, while all big tiers means that we have
+                # exactly one child tier (e.g. a cluster with only one
+                # region).
+                continue
+
+            # We assume each big child tier takes the maximum possible
+            # number of replicas for optimal dispersion, but no more.
+            # That leaves the remainder for the small child tiers.
+            big_child_replicas = max_child_replicas * big_child_count
+            small_child_replicas = tier_replicas - big_child_replicas
+
+            if small_child_replicas == 0:
+                # If we're not putting any replicas on small child
+                # tiers, then there's no need for overload. This also
+                # avoids a division-by-zero below.
+                continue
+
+            # We want the overloaded small tiers to take up their fair
+            # share of the replicas. We can express this as follows:
+            #
+            # Let Ws be the sum of the weights of the small child tiers.
+            #
+            # Let Wb be the sum of the weights of the big child tiers.
+            #
+            # Let Rt be the number of replicas at the current tier.
+            #
+            # Let Rs be the desired number of replicas for the small
+            # child tiers.
+            #
+            # Let L be the overload.
+            #
+            # Then, we have the following:
+            #
+            # (L * Ws) / (Wb + L * Ws) = Rs / Rt
+            #
+            # Solving for L, we get:
+            #
+            # L = 1 / (Ws / Wb * (Rt / Rs - 1))
+            required_overload = 1.0 / (
+                (small_child_weight / big_child_weight)
+                * (tier_replicas / small_child_replicas - 1)) - 1
+
+            if required_overload > max_required_overload:
+                self.logger.debug("Required overload for %r is %f [NEW HIGH]",
+                                  tier, required_overload)
+                max_required_overload = required_overload
+            else:
+                self.logger.debug("Required overload for %r is %f",
+                                  tier, required_overload)
+        return max_required_overload
+
     def pretend_min_part_hours_passed(self):
         """
         Override min_part_hours by marking all partitions as having been moved
         255 hours ago. This can be used to force a full rebalance on the next
         call to rebalance.
         """
-        for part in xrange(self.parts):
+        for part in range(self.parts):
             self._last_part_moves[part] = 0xff
 
     def get_part_devices(self, part):
@@ -642,6 +855,8 @@ class RingBuilder(object):
         used to sort the devices according to "most wanted" during rebalancing
         to best distribute partitions. A negative parts_wanted indicates the
         device is "overweight" and wishes to give partitions away if possible.
+
+        Note: parts_wanted does *not* consider overload.
         """
         weight_of_one_part = self.weight_of_one_part()
 
@@ -713,12 +928,12 @@ class RingBuilder(object):
                 if len(part2dev) < desired_length:
                     # Not long enough: needs to be extended and the
                     # newly-added pieces assigned to devices.
-                    for part in xrange(len(part2dev), desired_length):
+                    for part in range(len(part2dev), desired_length):
                         to_assign[part].append(replica)
                         part2dev.append(0)
                 elif len(part2dev) > desired_length:
                     # Too long: truncate this mapping.
-                    for part in xrange(desired_length, len(part2dev)):
+                    for part in range(desired_length, len(part2dev)):
                         dev_losing_part = self.devs[part2dev[part]]
                         dev_losing_part['parts'] -= 1
                         removed_replicas += 1
@@ -726,10 +941,10 @@ class RingBuilder(object):
             else:
                 # Mapping not present at all: make one up and assign
                 # all of it.
-                for part in xrange(desired_length):
+                for part in range(desired_length):
                     to_assign[part].append(replica)
                 self._replica2part2dev.append(
-                    array('H', (0 for _junk in xrange(desired_length))))
+                    array('H', (0 for _junk in range(desired_length))))
 
         return (to_assign.items(), removed_replicas)
 
@@ -738,7 +953,7 @@ class RingBuilder(object):
         Initial partition assignment is the same as rebalancing an
         existing ring, but with some initial setup beforehand.
         """
-        self._last_part_moves = array('B', (0 for _junk in xrange(self.parts)))
+        self._last_part_moves = array('B', (0 for _junk in range(self.parts)))
         self._last_part_moves_epoch = int(time())
         self._set_parts_wanted()
 
@@ -751,7 +966,7 @@ class RingBuilder(object):
         more recently than min_part_hours.
         """
         elapsed_hours = int(time() - self._last_part_moves_epoch) / 3600
-        for part in xrange(self.parts):
+        for part in range(self.parts):
             # The "min(self._last_part_moves[part] + elapsed_hours, 0xff)"
             # which was here showed up in profiling, so it got inlined.
             last_plus_elapsed = self._last_part_moves[part] + elapsed_hours
@@ -766,29 +981,30 @@ class RingBuilder(object):
         Returns a dict of (tier: available parts in other tiers) for all tiers
         in the ring.
 
-        Devices that have too much partitions (negative parts_wanted) are
-        ignored, otherwise the sum of all parts_wanted is 0 +/- rounding
-        errors.
+        Devices that have too many partitions (negative parts_wanted plus
+        overload) are ignored, otherwise the sum of all returned values is 0
+        +/- rounding errors.
+
+        This takes overload into account.
         """
         wanted_parts_for_tier = {}
         for dev in self._iter_devs():
-            pw = (max(0, dev['parts_wanted']) +
-                  max(int(math.ceil(
-                      (dev['parts_wanted'] + dev['parts']) * self.overload)),
-                      0))
+            extra_overload_parts = self._n_overload_parts(dev)
+            pw = max(dev['parts_wanted'] + extra_overload_parts, 0)
             for tier in tiers_for_dev(dev):
                 wanted_parts_for_tier.setdefault(tier, 0)
                 wanted_parts_for_tier[tier] += pw
         return wanted_parts_for_tier
 
-    def _gather_reassign_parts(self):
+    def _compute_sibling_tiers(self):
         """
-        Returns a list of (partition, replicas) pairs to be reassigned by
-        gathering from removed devices, insufficiently-far-apart replicas, and
-        overweight drives.
+        Returns a 2-tuple; the first value is a dictionary mapping each
+        device's id to its tiers, and the second is a dictionary mapping
+        a-tier: list-of-sibling-tiers.
         """
         # inline memoization of tiers_for_dev() results (profiling reveals it
-        # as a hot-spot).
+        # as a hot-spot). We also return it so callers don't have to
+        # rebuild it.
         tfd = {}
 
         tiers_by_len = defaultdict(set)
@@ -806,6 +1022,15 @@ class RingBuilder(object):
             for i, tier in enumerate(tiers):
                 sibling_tiers[tier] = [t for t in (tiers[:i] + tiers[(i + 1):])
                                        if t[:-1] == tier[:-1]]
+        return (tfd, sibling_tiers)
+
+    def _gather_reassign_parts(self):
+        """
+        Returns a list of (partition, replicas) pairs to be reassigned by
+        gathering from removed devices, insufficiently-far-apart replicas, and
+        overweight drives.
+        """
+        tfd, sibling_tiers = self._compute_sibling_tiers()
 
         # First we gather partitions from removed devices. Since removed
         # devices usually indicate device failures, we have no choice but to
@@ -830,7 +1055,7 @@ class RingBuilder(object):
         max_allowed_replicas = self._build_max_replicas_by_tier()
         wanted_parts_for_tier = self._get_available_parts()
         moved_parts = 0
-        for part in xrange(self.parts):
+        for part in range(self.parts):
             # Only move one replica at a time if possible.
             if part in removed_dev_parts:
                 continue
@@ -916,20 +1141,22 @@ class RingBuilder(object):
         start += random.randint(0, self.parts / 2)  # GRAH PEP8!!!
 
         self._last_part_gather_start = start
+
         for replica, part2dev in enumerate(self._replica2part2dev):
             # If we've got a partial replica, start may be out of
             # range. Scale it down so that we get a similar movement
             # pattern (but scaled down) on sequential runs.
             this_start = int(float(start) * len(part2dev) / self.parts)
 
-            for part in itertools.chain(xrange(this_start, len(part2dev)),
-                                        xrange(0, this_start)):
+            for part in itertools.chain(range(this_start, len(part2dev)),
+                                        range(0, this_start)):
                 if self._last_part_moves[part] < self.min_part_hours:
                     continue
                 if part in removed_dev_parts or part in spread_out_parts:
                     continue
                 dev = self.devs[part2dev[part]]
-                if dev['parts_wanted'] < 0:
+                fudge = self._n_overload_parts(dev)
+                if dev['parts_wanted'] + fudge < 0:
                     self._last_part_moves[part] = 0
                     dev['parts_wanted'] += 1
                     dev['parts'] -= 1
@@ -941,7 +1168,7 @@ class RingBuilder(object):
         reassign_parts.update(spread_out_parts)
         reassign_parts.update(removed_dev_parts)
 
-        reassign_parts_list = list(reassign_parts.iteritems())
+        reassign_parts_list = list(reassign_parts.items())
         # We shuffle the partitions to reassign so we get a more even
         # distribution later. There has been discussion of trying to distribute
         # partitions more "regularly" because that would actually reduce risk
@@ -951,6 +1178,14 @@ class RingBuilder(object):
         # conclusion, but working code wins for now.
         random.shuffle(reassign_parts_list)
         return reassign_parts_list
+
+    def _n_overload_parts(self, dev):
+        """
+        The number of extra partitions a device can take due to overload.
+        """
+        return max(int(math.ceil(
+            (dev['parts_wanted'] + dev['parts'])
+            * self._effective_overload)), 0)
 
     def _reassign_parts(self, reassign_parts):
         """
@@ -991,9 +1226,7 @@ class RingBuilder(object):
             # with partitions to shed, which is any time a device is being
             # removed, which is a pretty frequent operation.
             wanted = max(dev['parts_wanted'], 0)
-            fudge = max(int(math.ceil(
-                (dev['parts_wanted'] + dev['parts']) * self.overload)),
-                0)
+            fudge = self._n_overload_parts(dev)
             for tier in tiers:
                 fudge_available_in_tier[tier] += (wanted + fudge)
                 parts_available_in_tier[tier] += wanted
@@ -1119,9 +1352,26 @@ class RingBuilder(object):
                     if (roomiest_tier is None or
                         (other_replicas[roomiest_tier] >
                          other_replicas[fudgiest_tier])):
-                        tier = fudgiest_tier
+                        subtier = fudgiest_tier
                     else:
-                        tier = roomiest_tier
+                        subtier = roomiest_tier
+                    # no putting multiples on the same device
+                    if len(subtier) == 4 and (
+                            subtier in occupied_tiers_by_tier_len[4]):
+                        sibling_tiers = [
+                            (d['region'], d['zone'], d['ip'], d['id'])
+                            for d in tier2devs[tier]]
+                        unused_sibling_tiers = [
+                            t for t in sibling_tiers
+                            if t not in occupied_tiers_by_tier_len[4]]
+                        if unused_sibling_tiers:
+                            # anything is better than the alternative
+                            subtier = random.choice(unused_sibling_tiers)
+                        else:
+                            warnings.warn(RingValidationWarning(
+                                "All devices in tier %r already "
+                                "contain a replica" % (tier,)))
+                    tier = subtier
                     depth += 1
 
                 dev = tier2devs[tier][-1]
@@ -1270,7 +1520,7 @@ class RingBuilder(object):
         Generator yielding every (partition, replica) pair in the ring.
         """
         for replica, part2dev in enumerate(self._replica2part2dev):
-            for part in xrange(len(part2dev)):
+            for part in range(len(part2dev)):
                 yield (part, replica)
 
     @classmethod

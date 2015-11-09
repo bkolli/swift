@@ -92,6 +92,7 @@ Example usage of this middleware via ``swift``:
 
     Turn on listings::
 
+        swift post -r '.r:*,.rlistings' container
         swift post -m 'web-listings: true' container
 
     Now you should see object listings for paths and pseudo paths that have no
@@ -117,11 +118,12 @@ Example usage of this middleware via ``swift``:
 
 
 import cgi
+import json
 import time
 
 from swift.common.utils import human_readable, split_path, config_true_value, \
-    json, quote, get_valid_utf8_str, register_swift_info
-from swift.common.wsgi import make_pre_authed_env, WSGIContext
+    quote, register_swift_info, get_logger
+from swift.common.wsgi import make_env, WSGIContext
 from swift.common.http import is_success, is_redirection, HTTP_NOT_FOUND
 from swift.common.swob import Response, HTTPMovedPermanently, HTTPNotFound
 from swift.proxy.controllers.base import get_container_info
@@ -166,7 +168,7 @@ class _StaticWebContext(WSGIContext):
         save_response_status = self._response_status
         save_response_headers = self._response_headers
         save_response_exc_info = self._response_exc_info
-        resp = self._app_call(make_pre_authed_env(
+        resp = self._app_call(make_env(
             env, 'GET', '/%s/%s/%s/%s%s' % (
                 self.version, self.account, self.container,
                 self._get_status_int(), self._error),
@@ -235,7 +237,7 @@ class _StaticWebContext(WSGIContext):
             body += ' </body>\n</html>\n'
             resp = HTTPNotFound(body=body)(env, self._start_response)
             return self._error_response(resp, env, start_response)
-        tmp_env = make_pre_authed_env(
+        tmp_env = make_env(
             env, 'GET', '/%s/%s/%s' % (
                 self.version, self.account, self.container),
             self.agent, swift_source='SW')
@@ -289,7 +291,7 @@ class _StaticWebContext(WSGIContext):
                     '   </tr>\n'
         for item in listing:
             if 'subdir' in item:
-                subdir = get_valid_utf8_str(item['subdir'])
+                subdir = item['subdir'].encode("utf-8")
                 if prefix:
                     subdir = subdir[len(prefix):]
                 body += '   <tr class="item subdir">\n' \
@@ -300,13 +302,14 @@ class _StaticWebContext(WSGIContext):
                         (quote(subdir), cgi.escape(subdir))
         for item in listing:
             if 'name' in item:
-                name = get_valid_utf8_str(item['name'])
+                name = item['name'].encode("utf-8")
                 if prefix:
                     name = name[len(prefix):]
-                content_type = get_valid_utf8_str(item['content_type'])
-                bytes = get_valid_utf8_str(human_readable(item['bytes']))
-                last_modified = (cgi.escape(item['last_modified']).
-                                 split('.')[0].replace('T', ' '))
+                content_type = item['content_type'].encode("utf-8")
+                bytes = human_readable(item['bytes'])
+                last_modified = (
+                    cgi.escape(item['last_modified'].encode("utf-8")).
+                    split('.')[0].replace('T', ' '))
                 body += '   <tr class="item %s">\n' \
                         '    <td class="colname"><a href="%s">%s</a></td>\n' \
                         '    <td class="colsize">%s</td>\n' \
@@ -315,7 +318,7 @@ class _StaticWebContext(WSGIContext):
                         (' '.join('type-' + cgi.escape(t.lower(), quote=True)
                                   for t in content_type.split('/')),
                          quote(name), cgi.escape(name),
-                         bytes, get_valid_utf8_str(last_modified))
+                         bytes, last_modified)
         body += '  </table>\n' \
                 ' </body>\n' \
                 '</html>\n'
@@ -427,7 +430,7 @@ class _StaticWebContext(WSGIContext):
                 return resp
         if status_int == HTTP_NOT_FOUND:
             if env['PATH_INFO'][-1] != '/':
-                tmp_env = make_pre_authed_env(
+                tmp_env = make_env(
                     env, 'GET', '/%s/%s/%s' % (
                         self.version, self.account, self.container),
                     self.agent, swift_source='SW')
@@ -461,6 +464,7 @@ class StaticWeb(object):
         self.app = app
         #: The filter configuration dict.
         self.conf = conf
+        self.logger = get_logger(conf, log_route='staticweb')
 
     def __call__(self, env, start_response):
         """
@@ -470,6 +474,11 @@ class StaticWeb(object):
         :param start_response: The WSGI start_response hook.
         """
         env['staticweb.start_time'] = time.time()
+        if 'swift.authorize' not in env:
+            self.logger.warning(
+                'No authentication middleware authorized request yet. '
+                'Skipping staticweb')
+            return self.app(env, start_response)
         try:
             (version, account, container, obj) = \
                 split_path(env['PATH_INFO'], 2, 4, True)

@@ -19,7 +19,8 @@ import random
 import time
 import itertools
 from collections import defaultdict
-import cPickle as pickle
+import six
+import six.moves.cPickle as pickle
 import shutil
 
 from eventlet import (GreenPile, GreenPool, Timeout, sleep, hubs, tpool,
@@ -36,7 +37,8 @@ from swift.common.bufferedhttp import http_connect
 from swift.common.daemon import Daemon
 from swift.common.ring.utils import is_local_device
 from swift.obj.ssync_sender import Sender as ssync_sender
-from swift.common.http import HTTP_OK, HTTP_INSUFFICIENT_STORAGE
+from swift.common.http import HTTP_OK, HTTP_NOT_FOUND, \
+    HTTP_INSUFFICIENT_STORAGE
 from swift.obj.diskfile import DiskFileRouter, get_data_dir, \
     get_tmp_dir
 from swift.common.storage_policy import POLICIES, EC_POLICY
@@ -70,24 +72,27 @@ class RebuildingECDiskFileStream(object):
     metadata in the DiskFile interface for ssync.
     """
 
-    def __init__(self, metadata, frag_index, rebuilt_fragment_iter):
+    def __init__(self, datafile_metadata, frag_index, rebuilt_fragment_iter):
         # start with metadata from a participating FA
-        self.metadata = metadata
+        self.datafile_metadata = datafile_metadata
 
         # the new FA is going to have the same length as others in the set
-        self._content_length = self.metadata['Content-Length']
+        self._content_length = self.datafile_metadata['Content-Length']
 
         # update the FI and delete the ETag, the obj server will
         # recalc on the other side...
-        self.metadata['X-Object-Sysmeta-Ec-Frag-Index'] = frag_index
+        self.datafile_metadata['X-Object-Sysmeta-Ec-Frag-Index'] = frag_index
         for etag_key in ('ETag', 'Etag'):
-            self.metadata.pop(etag_key, None)
+            self.datafile_metadata.pop(etag_key, None)
 
         self.frag_index = frag_index
         self.rebuilt_fragment_iter = rebuilt_fragment_iter
 
     def get_metadata(self):
-        return self.metadata
+        return self.datafile_metadata
+
+    def get_datafile_metadata(self):
+        return self.datafile_metadata
 
     @property
     def content_length(self):
@@ -119,14 +124,18 @@ class ObjectReconstructor(Daemon):
         self.devices_dir = conf.get('devices', '/srv/node')
         self.mount_check = config_true_value(conf.get('mount_check', 'true'))
         self.swift_dir = conf.get('swift_dir', '/etc/swift')
-        self.port = int(conf.get('bind_port', 6000))
+        self.bind_ip = conf.get('bind_ip', '0.0.0.0')
+        self.servers_per_port = int(conf.get('servers_per_port', '0') or 0)
+        self.port = None if self.servers_per_port else \
+            int(conf.get('bind_port', 6000))
         self.concurrency = int(conf.get('concurrency', 1))
         self.stats_interval = int(conf.get('stats_interval', '300'))
         self.ring_check_interval = int(conf.get('ring_check_interval', 15))
         self.next_check = time.time() + self.ring_check_interval
         self.reclaim_age = int(conf.get('reclaim_age', 86400 * 7))
         self.partition_times = []
-        self.run_pause = int(conf.get('run_pause', 30))
+        self.interval = int(conf.get('interval') or
+                            conf.get('run_pause') or 30)
         self.http_timeout = int(conf.get('http_timeout', 60))
         self.lockup_timeout = int(conf.get('lockup_timeout', 1800))
         self.recon_cache_path = conf.get('recon_cache_path',
@@ -199,11 +208,13 @@ class ObjectReconstructor(Daemon):
                                     part, 'GET', path, headers=headers)
             with Timeout(self.node_timeout):
                 resp = conn.getresponse()
-            if resp.status != HTTP_OK:
+            if resp.status not in [HTTP_OK, HTTP_NOT_FOUND]:
                 self.logger.warning(
                     _("Invalid response %(resp)s from %(full_path)s"),
                     {'resp': resp.status,
                      'full_path': self._full_path(node, part, path, policy)})
+                resp = None
+            elif resp.status == HTTP_NOT_FOUND:
                 resp = None
         except (Exception, Timeout):
             self.logger.exception(
@@ -211,7 +222,7 @@ class ObjectReconstructor(Daemon):
                     'full_path': self._full_path(node, part, path, policy)})
         return resp
 
-    def reconstruct_fa(self, job, node, metadata):
+    def reconstruct_fa(self, job, node, datafile_metadata):
         """
         Reconstructs a fragment archive - this method is called from ssync
         after a remote node responds that is missing this object - the local
@@ -220,7 +231,8 @@ class ObjectReconstructor(Daemon):
 
         :param job: job from ssync_sender
         :param node: node that we're rebuilding to
-        :param metadata:  the metadata to attach to the rebuilt archive
+        :param datafile_metadata:  the datafile metadata to attach to
+                                   the rebuilt fragment archive
         :returns: a DiskFile like class for use by ssync
         :raises DiskFileError: if the fragment archive cannot be reconstructed
         """
@@ -234,11 +246,10 @@ class ObjectReconstructor(Daemon):
         fi_to_rebuild = node['index']
 
         # KISS send out connection requests to all nodes, see what sticks
-        headers = {
-            'X-Backend-Storage-Policy-Index': int(job['policy']),
-        }
+        headers = self.headers.copy()
+        headers['X-Backend-Storage-Policy-Index'] = int(job['policy'])
         pile = GreenAsyncPile(len(part_nodes))
-        path = metadata['name']
+        path = datafile_metadata['name']
         for node in part_nodes:
             pile.spawn(self._get_response, node, job['partition'],
                        path, headers, job['policy'])
@@ -248,6 +259,13 @@ class ObjectReconstructor(Daemon):
             if not resp:
                 continue
             resp.headers = HeaderKeyDict(resp.getheaders())
+            if str(fi_to_rebuild) == \
+                    resp.headers.get('X-Object-Sysmeta-Ec-Frag-Index'):
+                continue
+            if resp.headers.get('X-Object-Sysmeta-Ec-Frag-Index') in set(
+                    r.headers.get('X-Object-Sysmeta-Ec-Frag-Index')
+                    for r in responses):
+                continue
             responses.append(resp)
             etag = sorted(responses, reverse=True,
                           key=lambda r: Timestamp(
@@ -264,14 +282,14 @@ class ObjectReconstructor(Daemon):
                 'to reconstruct %s with ETag %s' % (
                     len(responses), job['policy'].ec_ndata,
                     self._full_path(node, job['partition'],
-                                    metadata['name'], job['policy']),
+                                    datafile_metadata['name'], job['policy']),
                     etag))
             raise DiskFileError('Unable to reconstruct EC archive')
 
         rebuilt_fragment_iter = self.make_rebuilt_fragment_iter(
             responses[:job['policy'].ec_ndata], path, job['policy'],
             fi_to_rebuild)
-        return RebuildingECDiskFileStream(metadata, fi_to_rebuild,
+        return RebuildingECDiskFileStream(datafile_metadata, fi_to_rebuild,
                                           rebuilt_fragment_iter)
 
     def _reconstruct(self, policy, fragment_payload, frag_index):
@@ -308,11 +326,11 @@ class ObjectReconstructor(Daemon):
                 except (Exception, Timeout):
                     self.logger.exception(
                         _("Error trying to rebuild %(path)s "
-                          "policy#%(policy)d frag#%(frag_index)s"), {
-                              'path': path,
-                              'policy': policy,
-                              'frag_index': frag_index,
-                          })
+                          "policy#%(policy)d frag#%(frag_index)s"),
+                        {'path': path,
+                         'policy': policy,
+                         'frag_index': frag_index,
+                         })
                     break
                 if not all(fragment_payload):
                     break
@@ -326,22 +344,34 @@ class ObjectReconstructor(Daemon):
         """
         Logs various stats for the currently running reconstruction pass.
         """
-        if self.reconstruction_count:
+        if (self.device_count and self.part_count and
+                self.reconstruction_device_count):
             elapsed = (time.time() - self.start) or 0.000001
-            rate = self.reconstruction_count / elapsed
+            rate = self.reconstruction_part_count / elapsed
+            total_part_count = (self.part_count *
+                                self.device_count /
+                                self.reconstruction_device_count)
             self.logger.info(
                 _("%(reconstructed)d/%(total)d (%(percentage).2f%%)"
-                  " partitions reconstructed in %(time).2fs (%(rate).2f/sec, "
-                  "%(remaining)s remaining)"),
-                {'reconstructed': self.reconstruction_count,
-                 'total': self.job_count,
+                  " partitions of %(device)d/%(dtotal)d "
+                  "(%(dpercentage).2f%%) devices"
+                  " reconstructed in %(time).2fs "
+                  "(%(rate).2f/sec, %(remaining)s remaining)"),
+                {'reconstructed': self.reconstruction_part_count,
+                 'total': self.part_count,
                  'percentage':
-                 self.reconstruction_count * 100.0 / self.job_count,
+                 self.reconstruction_part_count * 100.0 / self.part_count,
+                 'device': self.reconstruction_device_count,
+                 'dtotal': self.device_count,
+                 'dpercentage':
+                 self.reconstruction_device_count * 100.0 / self.device_count,
                  'time': time.time() - self.start, 'rate': rate,
-                 'remaining': '%d%s' % compute_eta(self.start,
-                                                   self.reconstruction_count,
-                                                   self.job_count)})
-            if self.suffix_count:
+                 'remaining': '%d%s' %
+                 compute_eta(self.start,
+                             self.reconstruction_part_count,
+                             total_part_count)})
+
+            if self.suffix_count and self.partition_times:
                 self.logger.info(
                     _("%(checked)d suffixes checked - "
                       "%(hashed).2f%% hashed, %(synced).2f%% synced"),
@@ -415,7 +445,7 @@ class ObjectReconstructor(Daemon):
         :returns: a list of strings, the suffix dirs to sync
         """
         suffixes = []
-        for suffix, sub_dict_local in local_suff.iteritems():
+        for suffix, sub_dict_local in local_suff.items():
             sub_dict_remote = remote_suff.get(suffix, {})
             if (sub_dict_local.get(None) != sub_dict_remote.get(None) or
                     sub_dict_local.get(local_index) !=
@@ -463,14 +493,11 @@ class ObjectReconstructor(Daemon):
                     self._full_path(node, job['partition'], '',
                                     job['policy']))
             elif resp.status != HTTP_OK:
+                full_path = self._full_path(node, job['partition'], '',
+                                            job['policy'])
                 self.logger.error(
-                    _("Invalid response %(resp)s "
-                      "from %(full_path)s"), {
-                          'resp': resp.status,
-                          'full_path': self._full_path(
-                              node, job['partition'], '',
-                              job['policy'])
-                      })
+                    _("Invalid response %(resp)s from %(full_path)s"),
+                    {'resp': resp.status, 'full_path': full_path})
             else:
                 remote_suffixes = pickle.loads(resp.read())
         except (Exception, Timeout):
@@ -514,14 +541,17 @@ class ObjectReconstructor(Daemon):
         :param frag_index: (int) the fragment index of data files to be deleted
         """
         df_mgr = self._df_router[job['policy']]
-        for object_hash, timestamp in objects.items():
+        for object_hash, timestamps in objects.items():
             try:
                 df = df_mgr.get_diskfile_from_hash(
                     job['local_dev']['device'], job['partition'],
                     object_hash, job['policy'],
                     frag_index=frag_index)
-                df.purge(Timestamp(timestamp), frag_index)
+                df.purge(timestamps['ts_data'], frag_index)
             except DiskFileError:
+                self.logger.exception(
+                    'Unable to purge DiskFile (%r %r %r)',
+                    object_hash, timestamps['ts_data'], frag_index)
                 continue
 
     def process_job(self, job):
@@ -763,22 +793,29 @@ class ObjectReconstructor(Daemon):
         """
         override_devices = override_devices or []
         override_partitions = override_partitions or []
-        ips = whataremyips()
+        ips = whataremyips(self.bind_ip)
         for policy in POLICIES:
             if policy.policy_type != EC_POLICY:
                 continue
             self._diskfile_mgr = self._df_router[policy]
             self.load_object_ring(policy)
             data_dir = get_data_dir(policy)
-            local_devices = itertools.ifilter(
+            local_devices = list(six.moves.filter(
                 lambda dev: dev and is_local_device(
                     ips, self.port,
                     dev['replication_ip'], dev['replication_port']),
-                policy.object_ring.devs)
+                policy.object_ring.devs))
+
+            if override_devices:
+                self.device_count = len(override_devices)
+            else:
+                self.device_count = len(local_devices)
+
             for local_dev in local_devices:
                 if override_devices and (local_dev['device'] not in
                                          override_devices):
                     continue
+                self.reconstruction_device_count += 1
                 dev_path = self._df_router[policy].get_dev_path(
                     local_dev['device'])
                 if not dev_path:
@@ -802,6 +839,8 @@ class ObjectReconstructor(Daemon):
                     self.logger.exception(
                         'Unable to list partitions in %r' % obj_path)
                     continue
+
+                self.part_count += len(partitions)
                 for partition in partitions:
                     part_path = join(obj_path, partition)
                     if not (partition.isdigit() and
@@ -809,6 +848,7 @@ class ObjectReconstructor(Daemon):
                         self.logger.warning(
                             'Unexpected entity in data dir: %r' % part_path)
                         remove_file(part_path)
+                        self.reconstruction_part_count += 1
                         continue
                     partition = int(partition)
                     if override_partitions and (partition not in
@@ -821,6 +861,7 @@ class ObjectReconstructor(Daemon):
                         'part_path': part_path,
                     }
                     yield part_info
+                    self.reconstruction_part_count += 1
 
     def build_reconstruction_jobs(self, part_info):
         """
@@ -838,10 +879,14 @@ class ObjectReconstructor(Daemon):
     def _reset_stats(self):
         self.start = time.time()
         self.job_count = 0
+        self.part_count = 0
+        self.device_count = 0
         self.suffix_count = 0
         self.suffix_sync = 0
         self.suffix_hash = 0
         self.reconstruction_count = 0
+        self.reconstruction_part_count = 0
+        self.reconstruction_device_count = 0
         self.last_reconstruction_count = -1
 
     def delete_partition(self, path):
@@ -920,5 +965,5 @@ class ObjectReconstructor(Daemon):
                               'object_reconstruction_last': time.time()},
                              self.rcache, self.logger)
             self.logger.debug('reconstruction sleeping for %s seconds.',
-                              self.run_pause)
-            sleep(self.run_pause)
+                              self.interval)
+            sleep(self.interval)

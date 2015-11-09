@@ -12,12 +12,10 @@
 # limitations under the License.
 
 import json
-import contextlib
 import mock
 import operator
 import time
 import unittest
-import urllib
 import socket
 import os
 import errno
@@ -26,6 +24,7 @@ import random
 
 from collections import defaultdict
 from datetime import datetime
+from six.moves import urllib
 from swift.container import reconciler
 from swift.container.server import gen_resp_headers
 from swift.common.direct_client import ClientException
@@ -153,7 +152,7 @@ class FakeInternalClient(reconciler.InternalClient):
                     obj_name = container_listing_data[-1]['name']
                     # client should quote and encode marker
                     end_qry_string = '?format=json&marker=%s&end_marker=' % (
-                        urllib.quote(obj_name.encode('utf-8')))
+                        urllib.parse.quote(obj_name.encode('utf-8')))
                     self.app.register('GET', container_path + end_qry_string,
                                       swob.HTTPOk, container_headers,
                                       json.dumps([]))
@@ -170,7 +169,7 @@ class FakeInternalClient(reconciler.InternalClient):
                               swob.HTTPOk, account_headers,
                               json.dumps(account_listing_data))
             end_qry_string = '?format=json&marker=%s&end_marker=' % (
-                urllib.quote(account_listing_data[-1]['name']))
+                urllib.parse.quote(account_listing_data[-1]['name']))
             self.app.register('GET', account_path + end_qry_string,
                               swob.HTTPOk, account_headers,
                               json.dumps([]))
@@ -207,8 +206,8 @@ class TestReconcilerUtils(unittest.TestCase):
         self.assertEqual(got['account'], 'AUTH_bob')
         self.assertEqual(got['container'], 'con')
         self.assertEqual(got['obj'], 'obj')
-        self.assertEqual(got['q_ts'], 0000001234.20190)
-        self.assertEqual(got['q_record'], 0000001234.20192)
+        self.assertEqual(got['q_ts'], 1234.20190)
+        self.assertEqual(got['q_record'], 1234.20192)
         self.assertEqual(got['q_op'], 'PUT')
 
         # negative test
@@ -237,15 +236,15 @@ class TestReconcilerUtils(unittest.TestCase):
         mock_path = 'swift.container.reconciler.direct_head_container'
         stub_resp_headers = [
             container_resp_headers(
-                status_changed_at=Timestamp(ts.next()).internal,
+                status_changed_at=Timestamp(next(ts)).internal,
                 storage_policy_index=0,
             ),
             container_resp_headers(
-                status_changed_at=Timestamp(ts.next()).internal,
+                status_changed_at=Timestamp(next(ts)).internal,
                 storage_policy_index=1,
             ),
             container_resp_headers(
-                status_changed_at=Timestamp(ts.next()).internal,
+                status_changed_at=Timestamp(next(ts)).internal,
                 storage_policy_index=0,
             ),
         ]
@@ -268,11 +267,11 @@ class TestReconcilerUtils(unittest.TestCase):
         mock_path = 'swift.container.reconciler.direct_head_container'
         stub_resp_headers = [
             container_resp_headers(
-                status_change_at=ts.next(),
+                status_change_at=next(ts),
                 storage_policy_index=2,
             ),
             container_resp_headers(
-                status_changed_at=ts.next(),
+                status_changed_at=next(ts),
                 storage_policy_index=1,
             ),
             # old timestamp, but 500 should be ignored...
@@ -297,11 +296,11 @@ class TestReconcilerUtils(unittest.TestCase):
         mock_path = 'swift.container.reconciler.direct_head_container'
         stub_resp_headers = [
             container_resp_headers(
-                status_changed_at=Timestamp(ts.next()).internal,
+                status_changed_at=Timestamp(next(ts)).internal,
                 storage_policy_index=1,
             ),
             container_resp_headers(
-                status_changed_at=Timestamp(ts.next()).internal,
+                status_changed_at=Timestamp(next(ts)).internal,
                 storage_policy_index=0,
             ),
             socket.error(errno.ECONNREFUSED, os.strerror(errno.ECONNREFUSED)),
@@ -318,7 +317,7 @@ class TestReconcilerUtils(unittest.TestCase):
         mock_path = 'swift.container.reconciler.direct_head_container'
         stub_resp_headers = [
             container_resp_headers(
-                status_changed_at=Timestamp(ts.next()).internal,
+                status_changed_at=Timestamp(next(ts)).internal,
                 storage_policy_index=0,
             ),
             socket.error(errno.ECONNREFUSED, os.strerror(errno.ECONNREFUSED)),
@@ -326,7 +325,7 @@ class TestReconcilerUtils(unittest.TestCase):
                 'Container Server blew up',
                 http_status=500, http_reason='Server Error',
                 http_headers=container_resp_headers(
-                    status_changed_at=Timestamp(ts.next()).internal,
+                    status_changed_at=Timestamp(next(ts)).internal,
                     storage_policy_index=1,
                 ),
             ),
@@ -376,9 +375,9 @@ class TestReconcilerUtils(unittest.TestCase):
                 'Container Not Found',
                 http_status=404, http_reason='Not Found',
                 http_headers=container_resp_headers(
-                    put_timestamp=ts.next(),
-                    delete_timestamp=ts.next(),
-                    status_changed_at=ts.next(),
+                    put_timestamp=next(ts),
+                    delete_timestamp=next(ts),
+                    status_changed_at=next(ts),
                     storage_policy_index=0,
                 ),
             ),
@@ -386,9 +385,9 @@ class TestReconcilerUtils(unittest.TestCase):
                 'Container Not Found',
                 http_status=404, http_reason='Not Found',
                 http_headers=container_resp_headers(
-                    put_timestamp=ts.next(),
-                    delete_timestamp=ts.next(),
-                    status_changed_at=ts.next(),
+                    put_timestamp=next(ts),
+                    delete_timestamp=next(ts),
+                    status_changed_at=next(ts),
                     storage_policy_index=1,
                 ),
             ),
@@ -396,9 +395,9 @@ class TestReconcilerUtils(unittest.TestCase):
                 'Container Not Found',
                 http_status=404, http_reason='Not Found',
                 http_headers=container_resp_headers(
-                    put_timestamp=ts.next(),
-                    delete_timestamp=ts.next(),
-                    status_changed_at=ts.next(),
+                    put_timestamp=next(ts),
+                    delete_timestamp=next(ts),
+                    status_changed_at=next(ts),
                     storage_policy_index=2,
                 ),
             ),
@@ -417,8 +416,8 @@ class TestReconcilerUtils(unittest.TestCase):
             # old put, no recreate
             container_resp_headers(
                 delete_timestamp=0,
-                put_timestamp=ts.next(),
-                status_changed_at=ts.next(),
+                put_timestamp=next(ts),
+                status_changed_at=next(ts),
                 storage_policy_index=0,
             ),
             # recently deleted
@@ -426,17 +425,17 @@ class TestReconcilerUtils(unittest.TestCase):
                 'Container Not Found',
                 http_status=404, http_reason='Not Found',
                 http_headers=container_resp_headers(
-                    put_timestamp=ts.next(),
-                    delete_timestamp=ts.next(),
-                    status_changed_at=ts.next(),
+                    put_timestamp=next(ts),
+                    delete_timestamp=next(ts),
+                    status_changed_at=next(ts),
                     storage_policy_index=1,
                 ),
             ),
             # recently recreated
             container_resp_headers(
-                delete_timestamp=ts.next(),
-                put_timestamp=ts.next(),
-                status_changed_at=ts.next(),
+                delete_timestamp=next(ts),
+                put_timestamp=next(ts),
+                status_changed_at=next(ts),
                 storage_policy_index=2,
             ),
         ]
@@ -454,22 +453,22 @@ class TestReconcilerUtils(unittest.TestCase):
             # oldest put
             container_resp_headers(
                 delete_timestamp=0,
-                put_timestamp=ts.next(),
-                status_changed_at=ts.next(),
+                put_timestamp=next(ts),
+                status_changed_at=next(ts),
                 storage_policy_index=0,
             ),
             # old recreate
             container_resp_headers(
-                delete_timestamp=ts.next(),
-                put_timestamp=ts.next(),
-                status_changed_at=ts.next(),
+                delete_timestamp=next(ts),
+                put_timestamp=next(ts),
+                status_changed_at=next(ts),
                 storage_policy_index=1,
             ),
             # recently put
             container_resp_headers(
                 delete_timestamp=0,
-                put_timestamp=ts.next(),
-                status_changed_at=ts.next(),
+                put_timestamp=next(ts),
+                status_changed_at=next(ts),
                 storage_policy_index=2,
             ),
         ]
@@ -486,15 +485,15 @@ class TestReconcilerUtils(unittest.TestCase):
         mock_path = 'swift.container.reconciler.direct_head_container'
         stub_resp_headers = [
             container_resp_headers(
-                status_changed_at=Timestamp(ts.next()).internal,
+                status_changed_at=Timestamp(next(ts)).internal,
                 storage_policy_index=0,
             ),
             container_resp_headers(
-                status_changed_at=Timestamp(ts.next()).internal,
+                status_changed_at=Timestamp(next(ts)).internal,
                 storage_policy_index=1,
             ),
             container_resp_headers(
-                status_changed_at=Timestamp(ts.next()).internal,
+                status_changed_at=Timestamp(next(ts)).internal,
                 storage_policy_index=0,
             ),
         ]
@@ -567,10 +566,8 @@ class TestReconcilerUtils(unittest.TestCase):
         mock_direct_delete = mock.MagicMock()
         mock_direct_delete.side_effect = stub_resp
 
-        with contextlib.nested(
-                mock.patch(mock_path, mock_direct_delete),
-                mock.patch('eventlet.greenpool.DEBUG', False),
-        ):
+        with mock.patch(mock_path, mock_direct_delete), \
+                mock.patch('eventlet.greenpool.DEBUG', False):
             rv = reconciler.direct_delete_container_entry(
                 self.fake_ring, 'a', 'c', 'o')
         self.assertEqual(rv, None)
@@ -606,9 +603,9 @@ class TestReconcilerUtils(unittest.TestCase):
             self.assertEqual(args['headers']['X-Content-Type'],
                              'application/x-delete')
             for header in required_headers:
-                self.assert_(header in args['headers'],
-                             '%r was missing request headers %r' % (
-                                 header, args['headers']))
+                self.assertTrue(header in args['headers'],
+                                '%r was missing request headers %r' % (
+                                    header, args['headers']))
 
     def test_add_to_reconciler_queue_force(self):
         mock_path = 'swift.common.direct_client.http_connect'
@@ -623,11 +620,9 @@ class TestReconcilerUtils(unittest.TestCase):
 
         fake_hc = fake_http_connect(200, 200, 200, give_connect=test_connect)
         now = time.time()
-        with contextlib.nested(
-                mock.patch(mock_path, fake_hc),
+        with mock.patch(mock_path, fake_hc), \
                 mock.patch('swift.container.reconciler.time.time',
-                           lambda: now),
-        ):
+                           lambda: now):
             ret = reconciler.add_to_reconciler_queue(
                 self.fake_ring, 'a', 'c', 'o', 17, 5948918.63946, 'PUT',
                 force=True)
@@ -646,9 +641,9 @@ class TestReconcilerUtils(unittest.TestCase):
             self.assertEqual(args['path'],
                              '/.misplaced_objects/5947200/17:/a/c/o')
             for header in required_headers:
-                self.assert_(header in args['headers'],
-                             '%r was missing request headers %r' % (
-                                 header, args['headers']))
+                self.assertTrue(header in args['headers'],
+                                '%r was missing request headers %r' % (
+                                    header, args['headers']))
 
     def test_add_to_reconciler_queue_fails(self):
         mock_path = 'swift.common.direct_client.http_connect'
@@ -685,7 +680,7 @@ class TestReconcilerUtils(unittest.TestCase):
 
 def listing_qs(marker):
     return "?format=json&marker=%s&end_marker=" % \
-        urllib.quote(marker.encode('utf-8'))
+        urllib.parse.quote(marker.encode('utf-8'))
 
 
 class TestReconciler(unittest.TestCase):

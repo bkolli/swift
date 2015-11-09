@@ -16,11 +16,12 @@
 """Tests for swift.common.db"""
 
 import os
+import sys
 import unittest
 from tempfile import mkdtemp
 from shutil import rmtree, copy
 from uuid import uuid4
-import cPickle as pickle
+import six.moves.cPickle as pickle
 
 import simplejson
 import sqlite3
@@ -30,6 +31,7 @@ import random
 from mock import patch, MagicMock
 
 from eventlet.timeout import Timeout
+from six.moves import range
 
 import swift.common.db
 from swift.common.constraints import \
@@ -49,14 +51,14 @@ class TestDatabaseConnectionError(unittest.TestCase):
     def test_str(self):
         err = \
             DatabaseConnectionError(':memory:', 'No valid database connection')
-        self.assert_(':memory:' in str(err))
-        self.assert_('No valid database connection' in str(err))
+        self.assertTrue(':memory:' in str(err))
+        self.assertTrue('No valid database connection' in str(err))
         err = DatabaseConnectionError(':memory:',
                                       'No valid database connection',
                                       timeout=1357)
-        self.assert_(':memory:' in str(err))
-        self.assert_('No valid database connection' in str(err))
-        self.assert_('1357' in str(err))
+        self.assertTrue(':memory:' in str(err))
+        self.assertTrue('No valid database connection' in str(err))
+        self.assertTrue('1357' in str(err))
 
 
 class TestDictFactory(unittest.TestCase):
@@ -68,16 +70,16 @@ class TestDictFactory(unittest.TestCase):
         conn.execute('INSERT INTO test (one, two) VALUES ("def", 456)')
         conn.commit()
         curs = conn.execute('SELECT one, two FROM test')
-        self.assertEquals(dict_factory(curs, curs.next()),
-                          {'one': 'abc', 'two': 123})
-        self.assertEquals(dict_factory(curs, curs.next()),
-                          {'one': 'def', 'two': 456})
+        self.assertEqual(dict_factory(curs, next(curs)),
+                         {'one': 'abc', 'two': 123})
+        self.assertEqual(dict_factory(curs, next(curs)),
+                         {'one': 'def', 'two': 456})
 
 
 class TestChexor(unittest.TestCase):
 
     def test_normal_case(self):
-        self.assertEquals(
+        self.assertEqual(
             chexor('d41d8cd98f00b204e9800998ecf8427e',
                    'new name', normalize_timestamp(1)),
             '4f2ea31ac14d4273fe32ba08062b21de')
@@ -96,12 +98,12 @@ class TestChexor(unittest.TestCase):
               itertools.count(int(time.time())))
 
         objects = [
-            ('frank', ts.next()),
-            ('bob', ts.next()),
-            ('tom', ts.next()),
-            ('frank', ts.next()),
-            ('tom', ts.next()),
-            ('bob', ts.next()),
+            ('frank', next(ts)),
+            ('bob', next(ts)),
+            ('tom', next(ts)),
+            ('frank', next(ts)),
+            ('tom', next(ts)),
+            ('bob', next(ts)),
         ]
         hash_ = '0'
         random.shuffle(objects)
@@ -155,7 +157,7 @@ class TestGetDBConnection(unittest.TestCase):
 
     def test_normal_case(self):
         conn = get_db_connection(':memory:')
-        self.assert_(hasattr(conn, 'execute'))
+        self.assertTrue(hasattr(conn, 'execute'))
 
     def test_invalid_path(self):
         self.assertRaises(DatabaseConnectionError, get_db_connection,
@@ -321,12 +323,12 @@ class TestExampleBroker(unittest.TestCase):
         # delete
         delete_timestamp = next(self.ts)
         broker.merge_timestamps(created_at, put_timestamp, delete_timestamp)
-        self.assert_(broker.is_deleted())
+        self.assertTrue(broker.is_deleted())
         info = broker.get_info()
         self.assertEqual(info['created_at'], created_at)
         self.assertEqual(info['put_timestamp'], put_timestamp)
         self.assertEqual(info['delete_timestamp'], delete_timestamp)
-        self.assert_(info['status_changed_at'] > Timestamp(put_timestamp))
+        self.assertTrue(info['status_changed_at'] > Timestamp(put_timestamp))
 
     def put_item(self, broker, timestamp):
         broker.put_test('test', timestamp)
@@ -363,7 +365,7 @@ class TestExampleBroker(unittest.TestCase):
         self.delete_item(broker, next(self.ts))
         self.assertEqual(broker.get_info()[
             '%s_count' % broker.db_contains_type], 0)
-        self.assert_(broker.is_deleted())
+        self.assertTrue(broker.is_deleted())
 
     def test_merge_timestamps_simple_recreate(self):
         put_timestamp = next(self.ts)
@@ -373,14 +375,14 @@ class TestExampleBroker(unittest.TestCase):
         created_at = broker.get_info()['created_at']
         delete_timestamp = next(self.ts)
         broker.merge_timestamps(created_at, put_timestamp, delete_timestamp)
-        self.assert_(broker.is_deleted())
+        self.assertTrue(broker.is_deleted())
         info = broker.get_info()
         self.assertEqual(info['created_at'], created_at)
         self.assertEqual(info['put_timestamp'], put_timestamp)
         self.assertEqual(info['delete_timestamp'], delete_timestamp)
         orig_status_changed_at = info['status_changed_at']
-        self.assert_(orig_status_changed_at >
-                     Timestamp(virgin_status_changed_at))
+        self.assertTrue(orig_status_changed_at >
+                        Timestamp(virgin_status_changed_at))
         # recreate
         recreate_timestamp = next(self.ts)
         status_changed_at = time.time()
@@ -391,7 +393,7 @@ class TestExampleBroker(unittest.TestCase):
         self.assertEqual(info['created_at'], created_at)
         self.assertEqual(info['put_timestamp'], recreate_timestamp)
         self.assertEqual(info['delete_timestamp'], delete_timestamp)
-        self.assert_(info['status_changed_at'], status_changed_at)
+        self.assertTrue(info['status_changed_at'], status_changed_at)
 
     def test_merge_timestamps_recreate_with_objects(self):
         put_timestamp = next(self.ts)
@@ -401,14 +403,14 @@ class TestExampleBroker(unittest.TestCase):
         # delete
         delete_timestamp = next(self.ts)
         broker.merge_timestamps(created_at, put_timestamp, delete_timestamp)
-        self.assert_(broker.is_deleted())
+        self.assertTrue(broker.is_deleted())
         info = broker.get_info()
         self.assertEqual(info['created_at'], created_at)
         self.assertEqual(info['put_timestamp'], put_timestamp)
         self.assertEqual(info['delete_timestamp'], delete_timestamp)
         orig_status_changed_at = info['status_changed_at']
-        self.assert_(Timestamp(orig_status_changed_at) >=
-                     Timestamp(put_timestamp))
+        self.assertTrue(Timestamp(orig_status_changed_at) >=
+                        Timestamp(put_timestamp))
         # add object
         self.put_item(broker, next(self.ts))
         count_key = '%s_count' % broker.db_contains_type
@@ -457,13 +459,13 @@ class TestExampleBroker(unittest.TestCase):
     def test_get_max_row(self):
         broker = self.broker_class(':memory:', account='a', container='c')
         broker.initialize(next(self.ts), storage_policy_index=int(self.policy))
-        self.assertEquals(-1, broker.get_max_row())
+        self.assertEqual(-1, broker.get_max_row())
         self.put_item(broker, next(self.ts))
-        self.assertEquals(1, broker.get_max_row())
+        self.assertEqual(1, broker.get_max_row())
         self.delete_item(broker, next(self.ts))
-        self.assertEquals(2, broker.get_max_row())
+        self.assertEqual(2, broker.get_max_row())
         self.put_item(broker, next(self.ts))
-        self.assertEquals(3, broker.get_max_row())
+        self.assertEqual(3, broker.get_max_row())
 
     def test_get_info(self):
         broker = self.broker_class(':memory:', account='test', container='c')
@@ -529,10 +531,10 @@ class TestExampleBroker(unittest.TestCase):
         with patch('swift.common.db.time.time', new=lambda: created_at):
             broker.initialize(put_timestamp,
                               storage_policy_index=int(self.policy))
-        self.assertEquals(broker.get_info()['status_changed_at'],
-                          put_timestamp)
-        self.assertEquals(broker.get_info()['created_at'],
-                          Timestamp(created_at).internal)
+        self.assertEqual(broker.get_info()['status_changed_at'],
+                         put_timestamp)
+        self.assertEqual(broker.get_info()['created_at'],
+                         Timestamp(created_at).internal)
         status_changed_at = next(self.ts)
         broker.update_status_changed_at(status_changed_at)
         self.assertEqual(broker.get_info()['status_changed_at'],
@@ -605,7 +607,7 @@ class TestDatabaseBroker(unittest.TestCase):
         db_file = os.path.join(self.testdir, '1.db')
         broker = DatabaseBroker(db_file)
         self.assertEqual(broker.db_file, db_file)
-        self.assert_(broker.conn is None)
+        self.assertTrue(broker.conn is None)
 
     def test_disk_preallocate(self):
         test_size = [-1]
@@ -622,7 +624,7 @@ class TestDatabaseBroker(unittest.TestCase):
             b = DatabaseBroker(db_file)
             b._preallocate()
             # We only wrote 1 byte, so we should end with the 1st step or 1 MB.
-            self.assertEquals(test_size[0], 1024 * 1024)
+            self.assertEqual(test_size[0], 1024 * 1024)
 
     def test_initialize(self):
         self.assertRaises(AttributeError,
@@ -639,16 +641,16 @@ class TestDatabaseBroker(unittest.TestCase):
         broker = DatabaseBroker(':memory:')
         broker._initialize = stub
         broker.initialize(normalize_timestamp('1'))
-        self.assert_(hasattr(stub_dict['args'][0], 'execute'))
-        self.assertEquals(stub_dict['args'][1], '0000000001.00000')
+        self.assertTrue(hasattr(stub_dict['args'][0], 'execute'))
+        self.assertEqual(stub_dict['args'][1], '0000000001.00000')
         with broker.get() as conn:
             conn.execute('SELECT * FROM outgoing_sync')
             conn.execute('SELECT * FROM incoming_sync')
         broker = DatabaseBroker(os.path.join(self.testdir, '1.db'))
         broker._initialize = stub
         broker.initialize(normalize_timestamp('1'))
-        self.assert_(hasattr(stub_dict['args'][0], 'execute'))
-        self.assertEquals(stub_dict['args'][1], '0000000001.00000')
+        self.assertTrue(hasattr(stub_dict['args'][0], 'execute'))
+        self.assertEqual(stub_dict['args'][1], '0000000001.00000')
         with broker.get() as conn:
             conn.execute('SELECT * FROM outgoing_sync')
             conn.execute('SELECT * FROM incoming_sync')
@@ -674,11 +676,11 @@ class TestDatabaseBroker(unittest.TestCase):
         broker._initialize = init_stub
         # Initializes a good broker for us
         broker.initialize(normalize_timestamp('1'))
-        self.assert_(broker.conn is not None)
+        self.assertTrue(broker.conn is not None)
         broker._delete_db = delete_stub
         stub_called[0] = False
         broker.delete_db('2')
-        self.assert_(stub_called[0])
+        self.assertTrue(stub_called[0])
         broker = DatabaseBroker(os.path.join(self.testdir, '1.db'))
         broker.db_type = 'test'
         broker._initialize = init_stub
@@ -686,12 +688,12 @@ class TestDatabaseBroker(unittest.TestCase):
         broker._delete_db = delete_stub
         stub_called[0] = False
         broker.delete_db('2')
-        self.assert_(stub_called[0])
+        self.assertTrue(stub_called[0])
         # ensure that metadata was cleared
         m2 = broker.metadata
-        self.assert_(not any(v[0] for v in m2.itervalues()))
-        self.assert_(all(v[1] == normalize_timestamp('2')
-                         for v in m2.itervalues()))
+        self.assertTrue(not any(v[0] for v in m2.itervalues()))
+        self.assertTrue(all(v[1] == normalize_timestamp('2')
+                            for v in m2.itervalues()))
 
     def test_get(self):
         broker = DatabaseBroker(':memory:')
@@ -708,7 +710,7 @@ class TestDatabaseBroker(unittest.TestCase):
                 conn.execute('SELECT 1')
         except Exception:
             got_exc = True
-        self.assert_(got_exc)
+        self.assertTrue(got_exc)
 
         def stub(*args, **kwargs):
             pass
@@ -725,14 +727,14 @@ class TestDatabaseBroker(unittest.TestCase):
             pass
         broker = DatabaseBroker(os.path.join(self.testdir, '1.db'))
         with broker.get() as conn:
-            self.assertEquals(
+            self.assertEqual(
                 [r[0] for r in conn.execute('SELECT * FROM test')], [])
         with broker.get() as conn:
             conn.execute('INSERT INTO test (one) VALUES ("1")')
             conn.commit()
         broker = DatabaseBroker(os.path.join(self.testdir, '1.db'))
         with broker.get() as conn:
-            self.assertEquals(
+            self.assertEqual(
                 [r[0] for r in conn.execute('SELECT * FROM test')], ['1'])
 
         dbpath = os.path.join(self.testdir, 'dev', 'dbs', 'par', 'pre', 'db')
@@ -752,7 +754,7 @@ class TestDatabaseBroker(unittest.TestCase):
                     conn.execute('SELECT * FROM test')
             except Exception as err:
                 exc = err
-            self.assertEquals(
+            self.assertEqual(
                 str(exc),
                 'Quarantined %s to %s due to malformed database' %
                 (dbpath, qpath))
@@ -768,7 +770,7 @@ class TestDatabaseBroker(unittest.TestCase):
                     conn.execute('SELECT * FROM test')
             except Exception as err:
                 exc = err
-            self.assertEquals(
+            self.assertEqual(
                 str(exc),
                 'Quarantined %s to %s due to corrupted database' %
                 (dbpath, qpath))
@@ -781,7 +783,7 @@ class TestDatabaseBroker(unittest.TestCase):
                 pass
         except Exception:
             got_exc = True
-        self.assert_(got_exc)
+        self.assertTrue(got_exc)
 
         def stub(*args, **kwargs):
             pass
@@ -801,7 +803,7 @@ class TestDatabaseBroker(unittest.TestCase):
                     pass
             except LockTimeout:
                 got_exc = True
-            self.assert_(got_exc)
+            self.assertTrue(got_exc)
         try:
             with broker.lock():
                 raise Exception('test')
@@ -827,39 +829,39 @@ class TestDatabaseBroker(unittest.TestCase):
         broker.newid(uuid2)
         with broker.get() as conn:
             uuids = [r[0] for r in conn.execute('SELECT * FROM test_stat')]
-            self.assertEquals(len(uuids), 1)
-            self.assertNotEquals(uuids[0], uuid1)
+            self.assertEqual(len(uuids), 1)
+            self.assertNotEqual(uuids[0], uuid1)
             uuid1 = uuids[0]
             points = [(r[0], r[1]) for r in conn.execute(
                 'SELECT sync_point, '
                 'remote_id FROM incoming_sync WHERE remote_id = ?', (uuid2,))]
-            self.assertEquals(len(points), 1)
-            self.assertEquals(points[0][0], -1)
-            self.assertEquals(points[0][1], uuid2)
+            self.assertEqual(len(points), 1)
+            self.assertEqual(points[0][0], -1)
+            self.assertEqual(points[0][1], uuid2)
             conn.execute('INSERT INTO test (one) VALUES ("1")')
             conn.commit()
         uuid3 = str(uuid4())
         broker.newid(uuid3)
         with broker.get() as conn:
             uuids = [r[0] for r in conn.execute('SELECT * FROM test_stat')]
-            self.assertEquals(len(uuids), 1)
-            self.assertNotEquals(uuids[0], uuid1)
+            self.assertEqual(len(uuids), 1)
+            self.assertNotEqual(uuids[0], uuid1)
             uuid1 = uuids[0]
             points = [(r[0], r[1]) for r in conn.execute(
                 'SELECT sync_point, '
                 'remote_id FROM incoming_sync WHERE remote_id = ?', (uuid3,))]
-            self.assertEquals(len(points), 1)
-            self.assertEquals(points[0][1], uuid3)
+            self.assertEqual(len(points), 1)
+            self.assertEqual(points[0][1], uuid3)
         broker.newid(uuid2)
         with broker.get() as conn:
             uuids = [r[0] for r in conn.execute('SELECT * FROM test_stat')]
-            self.assertEquals(len(uuids), 1)
-            self.assertNotEquals(uuids[0], uuid1)
+            self.assertEqual(len(uuids), 1)
+            self.assertNotEqual(uuids[0], uuid1)
             points = [(r[0], r[1]) for r in conn.execute(
                 'SELECT sync_point, '
                 'remote_id FROM incoming_sync WHERE remote_id = ?', (uuid2,))]
-            self.assertEquals(len(points), 1)
-            self.assertEquals(points[0][1], uuid2)
+            self.assertEqual(len(points), 1)
+            self.assertEqual(points[0][1], uuid2)
 
     def test_get_items_since(self):
         broker = DatabaseBroker(':memory:')
@@ -874,14 +876,14 @@ class TestDatabaseBroker(unittest.TestCase):
             conn.commit()
         broker._initialize = _initialize
         broker.initialize(normalize_timestamp('1'))
-        self.assertEquals(broker.get_items_since(-1, 10),
-                          [{'one': '1'}, {'one': '2'}, {'one': '3'}])
-        self.assertEquals(broker.get_items_since(-1, 2),
-                          [{'one': '1'}, {'one': '2'}])
-        self.assertEquals(broker.get_items_since(1, 2),
-                          [{'one': '2'}, {'one': '3'}])
-        self.assertEquals(broker.get_items_since(3, 2), [])
-        self.assertEquals(broker.get_items_since(999, 2), [])
+        self.assertEqual(broker.get_items_since(-1, 10),
+                         [{'one': '1'}, {'one': '2'}, {'one': '3'}])
+        self.assertEqual(broker.get_items_since(-1, 2),
+                         [{'one': '1'}, {'one': '2'}])
+        self.assertEqual(broker.get_items_since(1, 2),
+                         [{'one': '2'}, {'one': '3'}])
+        self.assertEqual(broker.get_items_since(3, 2), [])
+        self.assertEqual(broker.get_items_since(999, 2), [])
 
     def test_get_sync(self):
         broker = DatabaseBroker(':memory:')
@@ -899,29 +901,29 @@ class TestDatabaseBroker(unittest.TestCase):
         broker._initialize = _initialize
         broker.initialize(normalize_timestamp('1'))
         uuid2 = str(uuid4())
-        self.assertEquals(broker.get_sync(uuid2), -1)
+        self.assertEqual(broker.get_sync(uuid2), -1)
         broker.newid(uuid2)
-        self.assertEquals(broker.get_sync(uuid2), 1)
+        self.assertEqual(broker.get_sync(uuid2), 1)
         uuid3 = str(uuid4())
-        self.assertEquals(broker.get_sync(uuid3), -1)
+        self.assertEqual(broker.get_sync(uuid3), -1)
         with broker.get() as conn:
             conn.execute('INSERT INTO test (one) VALUES ("2")')
             conn.commit()
         broker.newid(uuid3)
-        self.assertEquals(broker.get_sync(uuid2), 1)
-        self.assertEquals(broker.get_sync(uuid3), 2)
-        self.assertEquals(broker.get_sync(uuid2, incoming=False), -1)
-        self.assertEquals(broker.get_sync(uuid3, incoming=False), -1)
+        self.assertEqual(broker.get_sync(uuid2), 1)
+        self.assertEqual(broker.get_sync(uuid3), 2)
+        self.assertEqual(broker.get_sync(uuid2, incoming=False), -1)
+        self.assertEqual(broker.get_sync(uuid3, incoming=False), -1)
         broker.merge_syncs([{'sync_point': 1, 'remote_id': uuid2}],
                            incoming=False)
-        self.assertEquals(broker.get_sync(uuid2), 1)
-        self.assertEquals(broker.get_sync(uuid3), 2)
-        self.assertEquals(broker.get_sync(uuid2, incoming=False), 1)
-        self.assertEquals(broker.get_sync(uuid3, incoming=False), -1)
+        self.assertEqual(broker.get_sync(uuid2), 1)
+        self.assertEqual(broker.get_sync(uuid3), 2)
+        self.assertEqual(broker.get_sync(uuid2, incoming=False), 1)
+        self.assertEqual(broker.get_sync(uuid3, incoming=False), -1)
         broker.merge_syncs([{'sync_point': 2, 'remote_id': uuid3}],
                            incoming=False)
-        self.assertEquals(broker.get_sync(uuid2, incoming=False), 1)
-        self.assertEquals(broker.get_sync(uuid3, incoming=False), 2)
+        self.assertEqual(broker.get_sync(uuid2, incoming=False), 1)
+        self.assertEqual(broker.get_sync(uuid3, incoming=False), 2)
 
     def test_merge_syncs(self):
         broker = DatabaseBroker(':memory:')
@@ -932,22 +934,22 @@ class TestDatabaseBroker(unittest.TestCase):
         broker.initialize(normalize_timestamp('1'))
         uuid2 = str(uuid4())
         broker.merge_syncs([{'sync_point': 1, 'remote_id': uuid2}])
-        self.assertEquals(broker.get_sync(uuid2), 1)
+        self.assertEqual(broker.get_sync(uuid2), 1)
         uuid3 = str(uuid4())
         broker.merge_syncs([{'sync_point': 2, 'remote_id': uuid3}])
-        self.assertEquals(broker.get_sync(uuid2), 1)
-        self.assertEquals(broker.get_sync(uuid3), 2)
-        self.assertEquals(broker.get_sync(uuid2, incoming=False), -1)
-        self.assertEquals(broker.get_sync(uuid3, incoming=False), -1)
+        self.assertEqual(broker.get_sync(uuid2), 1)
+        self.assertEqual(broker.get_sync(uuid3), 2)
+        self.assertEqual(broker.get_sync(uuid2, incoming=False), -1)
+        self.assertEqual(broker.get_sync(uuid3, incoming=False), -1)
         broker.merge_syncs([{'sync_point': 3, 'remote_id': uuid2},
                             {'sync_point': 4, 'remote_id': uuid3}],
                            incoming=False)
-        self.assertEquals(broker.get_sync(uuid2, incoming=False), 3)
-        self.assertEquals(broker.get_sync(uuid3, incoming=False), 4)
-        self.assertEquals(broker.get_sync(uuid2), 1)
-        self.assertEquals(broker.get_sync(uuid3), 2)
+        self.assertEqual(broker.get_sync(uuid2, incoming=False), 3)
+        self.assertEqual(broker.get_sync(uuid3, incoming=False), 4)
+        self.assertEqual(broker.get_sync(uuid2), 1)
+        self.assertEqual(broker.get_sync(uuid3), 2)
         broker.merge_syncs([{'sync_point': 5, 'remote_id': uuid2}])
-        self.assertEquals(broker.get_sync(uuid2), 5)
+        self.assertEqual(broker.get_sync(uuid2), 5)
 
     def test_get_replication_info(self):
         self.get_replication_info_tester(metadata=False)
@@ -1017,7 +1019,7 @@ class TestDatabaseBroker(unittest.TestCase):
         put_timestamp = normalize_timestamp(2)
         broker.initialize(put_timestamp)
         info = broker.get_replication_info()
-        self.assertEquals(info, {
+        self.assertEqual(info, {
             'account': broker.account, 'count': 0,
             'hash': '00000000000000000000000000000000',
             'created_at': broker_creation, 'put_timestamp': put_timestamp,
@@ -1030,7 +1032,7 @@ class TestDatabaseBroker(unittest.TestCase):
             ''', (insert_timestamp,))
             conn.commit()
         info = broker.get_replication_info()
-        self.assertEquals(info, {
+        self.assertEqual(info, {
             'account': broker.account, 'count': 1,
             'hash': 'bdc4c93f574b0d8c2911a27ce9dd38ba',
             'created_at': broker_creation, 'put_timestamp': put_timestamp,
@@ -1040,7 +1042,7 @@ class TestDatabaseBroker(unittest.TestCase):
             conn.execute('DELETE FROM test')
             conn.commit()
         info = broker.get_replication_info()
-        self.assertEquals(info, {
+        self.assertEqual(info, {
             'account': broker.account, 'count': 0,
             'hash': '00000000000000000000000000000000',
             'created_at': broker_creation, 'put_timestamp': put_timestamp,
@@ -1059,61 +1061,61 @@ class TestDatabaseBroker(unittest.TestCase):
         first_timestamp = normalize_timestamp(1)
         first_value = '1'
         broker.update_metadata({'First': [first_value, first_timestamp]})
-        self.assert_('First' in broker.metadata)
-        self.assertEquals(broker.metadata['First'],
-                          [first_value, first_timestamp])
+        self.assertTrue('First' in broker.metadata)
+        self.assertEqual(broker.metadata['First'],
+                         [first_value, first_timestamp])
         # Add our second item
         second_timestamp = normalize_timestamp(2)
         second_value = '2'
         broker.update_metadata({'Second': [second_value, second_timestamp]})
-        self.assert_('First' in broker.metadata)
-        self.assertEquals(broker.metadata['First'],
-                          [first_value, first_timestamp])
-        self.assert_('Second' in broker.metadata)
-        self.assertEquals(broker.metadata['Second'],
-                          [second_value, second_timestamp])
+        self.assertTrue('First' in broker.metadata)
+        self.assertEqual(broker.metadata['First'],
+                         [first_value, first_timestamp])
+        self.assertTrue('Second' in broker.metadata)
+        self.assertEqual(broker.metadata['Second'],
+                         [second_value, second_timestamp])
         # Update our first item
         first_timestamp = normalize_timestamp(3)
         first_value = '1b'
         broker.update_metadata({'First': [first_value, first_timestamp]})
-        self.assert_('First' in broker.metadata)
-        self.assertEquals(broker.metadata['First'],
-                          [first_value, first_timestamp])
-        self.assert_('Second' in broker.metadata)
-        self.assertEquals(broker.metadata['Second'],
-                          [second_value, second_timestamp])
+        self.assertTrue('First' in broker.metadata)
+        self.assertEqual(broker.metadata['First'],
+                         [first_value, first_timestamp])
+        self.assertTrue('Second' in broker.metadata)
+        self.assertEqual(broker.metadata['Second'],
+                         [second_value, second_timestamp])
         # Delete our second item (by setting to empty string)
         second_timestamp = normalize_timestamp(4)
         second_value = ''
         broker.update_metadata({'Second': [second_value, second_timestamp]})
-        self.assert_('First' in broker.metadata)
-        self.assertEquals(broker.metadata['First'],
-                          [first_value, first_timestamp])
-        self.assert_('Second' in broker.metadata)
-        self.assertEquals(broker.metadata['Second'],
-                          [second_value, second_timestamp])
+        self.assertTrue('First' in broker.metadata)
+        self.assertEqual(broker.metadata['First'],
+                         [first_value, first_timestamp])
+        self.assertTrue('Second' in broker.metadata)
+        self.assertEqual(broker.metadata['Second'],
+                         [second_value, second_timestamp])
         # Reclaim at point before second item was deleted
         reclaim(broker, normalize_timestamp(3))
-        self.assert_('First' in broker.metadata)
-        self.assertEquals(broker.metadata['First'],
-                          [first_value, first_timestamp])
-        self.assert_('Second' in broker.metadata)
-        self.assertEquals(broker.metadata['Second'],
-                          [second_value, second_timestamp])
+        self.assertTrue('First' in broker.metadata)
+        self.assertEqual(broker.metadata['First'],
+                         [first_value, first_timestamp])
+        self.assertTrue('Second' in broker.metadata)
+        self.assertEqual(broker.metadata['Second'],
+                         [second_value, second_timestamp])
         # Reclaim at point second item was deleted
         reclaim(broker, normalize_timestamp(4))
-        self.assert_('First' in broker.metadata)
-        self.assertEquals(broker.metadata['First'],
-                          [first_value, first_timestamp])
-        self.assert_('Second' in broker.metadata)
-        self.assertEquals(broker.metadata['Second'],
-                          [second_value, second_timestamp])
+        self.assertTrue('First' in broker.metadata)
+        self.assertEqual(broker.metadata['First'],
+                         [first_value, first_timestamp])
+        self.assertTrue('Second' in broker.metadata)
+        self.assertEqual(broker.metadata['Second'],
+                         [second_value, second_timestamp])
         # Reclaim after point second item was deleted
         reclaim(broker, normalize_timestamp(5))
-        self.assert_('First' in broker.metadata)
-        self.assertEquals(broker.metadata['First'],
-                          [first_value, first_timestamp])
-        self.assert_('Second' not in broker.metadata)
+        self.assertTrue('First' in broker.metadata)
+        self.assertEqual(broker.metadata['First'],
+                         [first_value, first_timestamp])
+        self.assertTrue('Second' not in broker.metadata)
 
     @patch.object(DatabaseBroker, 'validate_metadata')
     def test_validate_metadata_is_called_from_update_metadata(self, mock):
@@ -1135,7 +1137,7 @@ class TestDatabaseBroker(unittest.TestCase):
 
     def test_metadata_with_max_count(self):
         metadata = {}
-        for c in xrange(MAX_META_COUNT):
+        for c in range(MAX_META_COUNT):
             key = 'X-Account-Meta-F{0}'.format(c)
             metadata[key] = ('B', normalize_timestamp(1))
         key = 'X-Account-Meta-Foo'.format(c)
@@ -1147,7 +1149,7 @@ class TestDatabaseBroker(unittest.TestCase):
 
     def test_metadata_raises_exception_over_max_count(self):
         metadata = {}
-        for c in xrange(MAX_META_COUNT + 1):
+        for c in range(MAX_META_COUNT + 1):
             key = 'X-Account-Meta-F{0}'.format(c)
             metadata[key] = ('B', normalize_timestamp(1))
         message = ''
@@ -1200,6 +1202,29 @@ class TestDatabaseBroker(unittest.TestCase):
             message = str(e)
         self.assertEqual(message, '400 Bad Request')
 
+    def test_possibly_quarantine_disk_error(self):
+        dbpath = os.path.join(self.testdir, 'dev', 'dbs', 'par', 'pre', 'db')
+        mkdirs(dbpath)
+        qpath = os.path.join(self.testdir, 'dev', 'quarantined', 'tests', 'db')
+        broker = DatabaseBroker(os.path.join(dbpath, '1.db'))
+        broker.db_type = 'test'
+
+        def stub():
+            raise sqlite3.OperationalError('disk I/O error')
+
+        try:
+            stub()
+        except Exception:
+            try:
+                broker.possibly_quarantine(*sys.exc_info())
+            except Exception as exc:
+                self.assertEqual(
+                    str(exc),
+                    'Quarantined %s to %s due to disk error '
+                    'while accessing database' %
+                    (dbpath, qpath))
+            else:
+                self.fail('Expected an exception to be raised')
 
 if __name__ == '__main__':
     unittest.main()

@@ -15,15 +15,16 @@
 # limitations under the License.
 
 import numbers
+from six.moves import urllib
 import unittest
 import os
 import tarfile
-import urllib
 import zlib
 import mock
+import six
+from six import BytesIO
 from shutil import rmtree
 from tempfile import mkdtemp
-from StringIO import StringIO
 from eventlet import sleep
 from mock import patch, call
 from test.unit.common.middleware.helpers import FakeSwift
@@ -98,11 +99,11 @@ def build_dir_tree(start_path, tree_obj):
         for obj in tree_obj:
             build_dir_tree(start_path, obj)
     if isinstance(tree_obj, dict):
-        for dir_name, obj in tree_obj.iteritems():
+        for dir_name, obj in tree_obj.items():
             dir_path = os.path.join(start_path, dir_name)
             os.mkdir(dir_path)
             build_dir_tree(dir_path, obj)
-    if isinstance(tree_obj, unicode):
+    if isinstance(tree_obj, six.text_type):
         tree_obj = tree_obj.encode('utf8')
     if isinstance(tree_obj, str):
         obj_path = os.path.join(start_path, tree_obj)
@@ -115,13 +116,13 @@ def build_tar_tree(tar, start_path, tree_obj, base_path=''):
         for obj in tree_obj:
             build_tar_tree(tar, start_path, obj, base_path=base_path)
     if isinstance(tree_obj, dict):
-        for dir_name, obj in tree_obj.iteritems():
+        for dir_name, obj in tree_obj.items():
             dir_path = os.path.join(start_path, dir_name)
             tar_info = tarfile.TarInfo(dir_path[len(base_path):])
             tar_info.type = tarfile.DIRTYPE
             tar.addfile(tar_info)
             build_tar_tree(tar, dir_path, obj, base_path=base_path)
-    if isinstance(tree_obj, unicode):
+    if isinstance(tree_obj, six.text_type):
         tree_obj = tree_obj.encode('utf8')
     if isinstance(tree_obj, str):
         obj_path = os.path.join(start_path, tree_obj)
@@ -155,7 +156,7 @@ class TestUntarMetadata(unittest.TestCase):
         with open(os.path.join(self.testdir, "obj2"), "w") as fh2:
             fh2.write("obj2 contents\n")
 
-        tar_ball = StringIO()
+        tar_ball = BytesIO()
         tar_file = tarfile.TarFile.open(fileobj=tar_ball, mode="w",
                                         format=tarfile.PAX_FORMAT)
 
@@ -247,15 +248,15 @@ class TestUntar(unittest.TestCase):
 
     def test_create_container_for_path(self):
         req = Request.blank('/')
-        self.assertEquals(
+        self.assertEqual(
             self.bulk.create_container(req, '/create_cont/acc/cont'),
             True)
-        self.assertEquals(self.app.calls, 2)
+        self.assertEqual(self.app.calls, 2)
         self.assertRaises(
             bulk.CreateContainerError,
             self.bulk.create_container,
             req, '/create_cont_fail/acc/cont')
-        self.assertEquals(self.app.calls, 3)
+        self.assertEqual(self.app.calls, 3)
 
     def test_extract_tar_works(self):
         # On systems where $TMPDIR is long (like OS X), we need to do this
@@ -288,7 +289,7 @@ class TestUntar(unittest.TestCase):
             req.headers['transfer-encoding'] = 'chunked'
             resp_body = self.handle_extract_and_iter(req, compress_format)
             resp_data = utils.json.loads(resp_body)
-            self.assertEquals(resp_data['Number Files Created'], 6)
+            self.assertEqual(resp_data['Number Files Created'], 6)
 
             # test out xml
             req = Request.blank('/tar_works/acc/cont/')
@@ -297,10 +298,12 @@ class TestUntar(unittest.TestCase):
             req.headers['transfer-encoding'] = 'chunked'
             resp_body = self.handle_extract_and_iter(
                 req, compress_format, 'application/xml')
-            self.assert_('<response_status>201 Created</response_status>' in
-                         resp_body)
-            self.assert_('<number_files_created>6</number_files_created>' in
-                         resp_body)
+            self.assertTrue(
+                '<response_status>201 Created</response_status>' in
+                resp_body)
+            self.assertTrue(
+                '<number_files_created>6</number_files_created>' in
+                resp_body)
 
             # test out nonexistent format
             req = Request.blank('/tar_works/acc/cont/?extract-archive=tar',
@@ -316,7 +319,7 @@ class TestUntar(unittest.TestCase):
             app_iter = self.bulk(req.environ, fake_start_response)
             resp_body = ''.join([i for i in app_iter])
 
-            self.assert_('Response Status: 406' in resp_body)
+            self.assertTrue('Response Status: 406' in resp_body)
 
     def test_extract_call(self):
         base_name = 'base_works_gz'
@@ -339,7 +342,7 @@ class TestUntar(unittest.TestCase):
         req.environ['wsgi.input'] = open(
             os.path.join(self.testdir, 'tar_works.tar.gz'))
         self.bulk(req.environ, fake_start_response)
-        self.assertEquals(self.app.calls, 1)
+        self.assertEqual(self.app.calls, 1)
 
         self.app.calls = 0
         req.environ['wsgi.input'] = open(
@@ -348,7 +351,7 @@ class TestUntar(unittest.TestCase):
         req.method = 'PUT'
         app_iter = self.bulk(req.environ, fake_start_response)
         list(app_iter)  # iter over resp
-        self.assertEquals(self.app.calls, 7)
+        self.assertEqual(self.app.calls, 7)
 
         self.app.calls = 0
         req = Request.blank('/tar_works/acc/cont/?extract-archive=bad')
@@ -357,7 +360,7 @@ class TestUntar(unittest.TestCase):
         req.environ['wsgi.input'] = open(
             os.path.join(self.testdir, 'tar_works.tar.gz'))
         t = self.bulk(req.environ, fake_start_response)
-        self.assertEquals(t[0], "Unsupported archive format")
+        self.assertEqual(t[0], "Unsupported archive format")
 
         tar = tarfile.open(name=os.path.join(self.testdir,
                                              'tar_works.tar'),
@@ -372,7 +375,7 @@ class TestUntar(unittest.TestCase):
             os.path.join(self.testdir, 'tar_works.tar'))
         app_iter = self.bulk(req.environ, fake_start_response)
         list(app_iter)  # iter over resp
-        self.assertEquals(self.app.calls, 7)
+        self.assertEqual(self.app.calls, 7)
 
     def test_bad_container(self):
         req = Request.blank('/invalid/', body='')
@@ -421,7 +424,7 @@ class TestUntar(unittest.TestCase):
         req.headers['transfer-encoding'] = 'chunked'
         resp_body = self.handle_extract_and_iter(req, '')
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Number Files Created'], 4)
+        self.assertEqual(resp_data['Number Files Created'], 4)
 
     def test_extract_tar_fail_cont_401(self):
         self.build_tar()
@@ -431,10 +434,10 @@ class TestUntar(unittest.TestCase):
                                                       'tar_fails.tar'))
         req.headers['transfer-encoding'] = 'chunked'
         resp_body = self.handle_extract_and_iter(req, '')
-        self.assertEquals(self.app.calls, 1)
+        self.assertEqual(self.app.calls, 1)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Response Status'], '401 Unauthorized')
-        self.assertEquals(resp_data['Errors'], [])
+        self.assertEqual(resp_data['Response Status'], '401 Unauthorized')
+        self.assertEqual(resp_data['Errors'], [])
 
     def test_extract_tar_fail_obj_401(self):
         self.build_tar()
@@ -444,10 +447,10 @@ class TestUntar(unittest.TestCase):
                                                       'tar_fails.tar'))
         req.headers['transfer-encoding'] = 'chunked'
         resp_body = self.handle_extract_and_iter(req, '')
-        self.assertEquals(self.app.calls, 2)
+        self.assertEqual(self.app.calls, 2)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Response Status'], '401 Unauthorized')
-        self.assertEquals(
+        self.assertEqual(resp_data['Response Status'], '401 Unauthorized')
+        self.assertEqual(
             resp_data['Errors'],
             [['cont/base_fails1/sub_dir1/sub1_file1', '401 Unauthorized']])
 
@@ -459,10 +462,10 @@ class TestUntar(unittest.TestCase):
                                                       'tar_fails.tar'))
         req.headers['transfer-encoding'] = 'chunked'
         resp_body = self.handle_extract_and_iter(req, '')
-        self.assertEquals(self.app.calls, 6)
+        self.assertEqual(self.app.calls, 6)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Number Files Created'], 4)
-        self.assertEquals(
+        self.assertEqual(resp_data['Number Files Created'], 4)
+        self.assertEqual(
             resp_data['Errors'],
             [['cont/base_fails1/' + ('f' * 101), '400 Bad Request']])
 
@@ -474,10 +477,10 @@ class TestUntar(unittest.TestCase):
                                                       'tar_fails.tar'))
         req.headers['transfer-encoding'] = 'chunked'
         resp_body = self.handle_extract_and_iter(req, 'gz')
-        self.assertEquals(self.app.calls, 0)
+        self.assertEqual(self.app.calls, 0)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Response Status'], '400 Bad Request')
-        self.assertEquals(
+        self.assertEqual(resp_data['Response Status'], '400 Bad Request')
+        self.assertEqual(
             resp_data['Response Body'].lower(),
             'invalid tar file: not a gzip file')
 
@@ -491,10 +494,10 @@ class TestUntar(unittest.TestCase):
                                                           'tar_fails.tar'))
             req.headers['transfer-encoding'] = 'chunked'
             resp_body = self.handle_extract_and_iter(req, '')
-            self.assertEquals(self.app.calls, 5)
+            self.assertEqual(self.app.calls, 5)
             resp_data = utils.json.loads(resp_body)
-            self.assertEquals(resp_data['Number Files Created'], 3)
-            self.assertEquals(
+            self.assertEqual(resp_data['Number Files Created'], 3)
+            self.assertEqual(
                 resp_data['Errors'],
                 [['cont/base_fails1/' + ('f' * 101), '400 Bad Request']])
 
@@ -516,7 +519,7 @@ class TestUntar(unittest.TestCase):
         req.headers['transfer-encoding'] = 'chunked'
         resp_body = self.handle_extract_and_iter(req, '')
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(
+        self.assertEqual(
             resp_data['Errors'],
             [['cont' + self.testdir + '/test/sub_dir1/sub1_file1',
               '413 Request Entity Too Large']])
@@ -534,10 +537,10 @@ class TestUntar(unittest.TestCase):
                                 headers={'Accept': 'application/json'})
             req.headers['transfer-encoding'] = 'chunked'
             resp_body = self.handle_extract_and_iter(req, '')
-            self.assertEquals(self.app.calls, 5)
+            self.assertEqual(self.app.calls, 5)
             resp_data = utils.json.loads(resp_body)
-            self.assertEquals(resp_data['Response Status'], '400 Bad Request')
-            self.assertEquals(
+            self.assertEqual(resp_data['Response Status'], '400 Bad Request')
+            self.assertEqual(
                 resp_data['Response Body'],
                 'More than 1 containers to create from tar.')
 
@@ -554,8 +557,8 @@ class TestUntar(unittest.TestCase):
         req.headers['transfer-encoding'] = 'chunked'
         resp_body = self.handle_extract_and_iter(req, '')
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(self.app.calls, 5)
-        self.assertEquals(len(resp_data['Errors']), 5)
+        self.assertEqual(self.app.calls, 5)
+        self.assertEqual(len(resp_data['Errors']), 5)
 
     def test_extract_tar_fail_create_cont_value_err(self):
         self.build_tar()
@@ -571,9 +574,9 @@ class TestUntar(unittest.TestCase):
         with patch.object(self.bulk, 'create_container', bad_create):
             resp_body = self.handle_extract_and_iter(req, '')
             resp_data = utils.json.loads(resp_body)
-            self.assertEquals(self.app.calls, 0)
-            self.assertEquals(len(resp_data['Errors']), 5)
-            self.assertEquals(
+            self.assertEqual(self.app.calls, 0)
+            self.assertEqual(len(resp_data['Errors']), 5)
+            self.assertEqual(
                 resp_data['Errors'][0],
                 ['cont/base_fails1/sub_dir1/sub1_file1', '400 Bad Request'])
 
@@ -589,10 +592,10 @@ class TestUntar(unittest.TestCase):
         req.headers['transfer-encoding'] = 'chunked'
         resp_body = self.handle_extract_and_iter(req, '')
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(self.app.calls, 4)
-        self.assertEquals(resp_data['Number Files Created'], 2)
-        self.assertEquals(resp_data['Response Status'], '400 Bad Request')
-        self.assertEquals(
+        self.assertEqual(self.app.calls, 4)
+        self.assertEqual(resp_data['Number Files Created'], 2)
+        self.assertEqual(resp_data['Response Status'], '400 Bad Request')
+        self.assertEqual(
             resp_data['Errors'],
             [['sub_dir2/sub2%DEfile1', '412 Precondition Failed'],
              ['sub_%DEdir3/sub4_dir1/sub4_file1', '412 Precondition Failed']])
@@ -600,10 +603,10 @@ class TestUntar(unittest.TestCase):
     def test_get_response_body(self):
         txt_body = bulk.get_response_body(
             'bad_formay', {'hey': 'there'}, [['json > xml', '202 Accepted']])
-        self.assert_('hey: there' in txt_body)
+        self.assertTrue('hey: there' in txt_body)
         xml_body = bulk.get_response_body(
             'text/xml', {'hey': 'there'}, [['json > xml', '202 Accepted']])
-        self.assert_('&gt' in xml_body)
+        self.assertTrue('&gt' in xml_body)
 
 
 class TestDelete(unittest.TestCase):
@@ -633,42 +636,42 @@ class TestDelete(unittest.TestCase):
         resp_body = ''.join(self.bulk.handle_delete_iter(
             req, objs_to_delete=objs_to_delete,
             out_content_type='application/json'))
-        self.assertEquals(
+        self.assertEqual(
             self.app.delete_paths, ['/delete_works/AUTH_Acc/c/file_a',
                                     '/delete_works/AUTH_Acc/c/file_d'])
-        self.assertEquals(self.app.calls, 2)
+        self.assertEqual(self.app.calls, 2)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Response Status'], '400 Bad Request')
-        self.assertEquals(resp_data['Number Deleted'], 2)
-        self.assertEquals(resp_data['Number Not Found'], 1)
-        self.assertEquals(resp_data['Errors'],
-                          [['/c/file_c', 'unauthorized']])
+        self.assertEqual(resp_data['Response Status'], '400 Bad Request')
+        self.assertEqual(resp_data['Number Deleted'], 2)
+        self.assertEqual(resp_data['Number Not Found'], 1)
+        self.assertEqual(resp_data['Errors'],
+                         [['/c/file_c', 'unauthorized']])
 
     def test_bulk_delete_works_with_POST_verb(self):
         req = Request.blank('/delete_works/AUTH_Acc', body='/c/f\n/c/f404',
                             headers={'Accept': 'application/json'})
         req.method = 'POST'
         resp_body = self.handle_delete_and_iter(req)
-        self.assertEquals(
+        self.assertEqual(
             self.app.delete_paths,
             ['/delete_works/AUTH_Acc/c/f', '/delete_works/AUTH_Acc/c/f404'])
-        self.assertEquals(self.app.calls, 2)
+        self.assertEqual(self.app.calls, 2)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Number Deleted'], 1)
-        self.assertEquals(resp_data['Number Not Found'], 1)
+        self.assertEqual(resp_data['Number Deleted'], 1)
+        self.assertEqual(resp_data['Number Not Found'], 1)
 
     def test_bulk_delete_works_with_DELETE_verb(self):
         req = Request.blank('/delete_works/AUTH_Acc', body='/c/f\n/c/f404',
                             headers={'Accept': 'application/json'})
         req.method = 'DELETE'
         resp_body = self.handle_delete_and_iter(req)
-        self.assertEquals(
+        self.assertEqual(
             self.app.delete_paths,
             ['/delete_works/AUTH_Acc/c/f', '/delete_works/AUTH_Acc/c/f404'])
-        self.assertEquals(self.app.calls, 2)
+        self.assertEqual(self.app.calls, 2)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Number Deleted'], 1)
-        self.assertEquals(resp_data['Number Not Found'], 1)
+        self.assertEqual(resp_data['Number Deleted'], 1)
+        self.assertEqual(resp_data['Number Not Found'], 1)
 
     def test_bulk_delete_bad_content_type(self):
         req = Request.blank('/delete_works/AUTH_Acc',
@@ -678,42 +681,42 @@ class TestDelete(unittest.TestCase):
                             headers={'Accept': 'application/json',
                                      'Content-Type': 'text/xml'})
         req.method = 'POST'
-        req.environ['wsgi.input'] = StringIO('/c/f\n/c/f404')
+        req.environ['wsgi.input'] = BytesIO(b'/c/f\n/c/f404')
         resp_body = self.handle_delete_and_iter(req)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Response Status'], '406 Not Acceptable')
+        self.assertEqual(resp_data['Response Status'], '406 Not Acceptable')
 
     def test_bulk_delete_call_and_content_type(self):
         def fake_start_response(*args, **kwargs):
-            self.assertEquals(args[1][0], ('Content-Type', 'application/json'))
+            self.assertEqual(args[1][0], ('Content-Type', 'application/json'))
 
         req = Request.blank('/delete_works/AUTH_Acc?bulk-delete')
         req.method = 'POST'
         req.headers['Transfer-Encoding'] = 'chunked'
         req.headers['Accept'] = 'application/json'
-        req.environ['wsgi.input'] = StringIO('/c/f%20')
+        req.environ['wsgi.input'] = BytesIO(b'/c/f%20')
         list(self.bulk(req.environ, fake_start_response))  # iterate over resp
-        self.assertEquals(
+        self.assertEqual(
             self.app.delete_paths, ['/delete_works/AUTH_Acc/c/f '])
-        self.assertEquals(self.app.calls, 1)
+        self.assertEqual(self.app.calls, 1)
 
     def test_bulk_delete_get_objs(self):
         req = Request.blank('/delete_works/AUTH_Acc', body='1%20\r\n2\r\n')
         req.method = 'POST'
         with patch.object(self.bulk, 'max_deletes_per_request', 2):
             results = self.bulk.get_objs_to_delete(req)
-            self.assertEquals(results, [{'name': '1 '}, {'name': '2'}])
+            self.assertEqual(results, [{'name': '1 '}, {'name': '2'}])
 
         with patch.object(self.bulk, 'max_path_length', 2):
             results = []
-            req.environ['wsgi.input'] = StringIO('1\n2\n3')
+            req.environ['wsgi.input'] = BytesIO(b'1\n2\n3')
             results = self.bulk.get_objs_to_delete(req)
-            self.assertEquals(results,
-                              [{'name': '1'}, {'name': '2'}, {'name': '3'}])
+            self.assertEqual(results,
+                             [{'name': '1'}, {'name': '2'}, {'name': '3'}])
 
         with patch.object(self.bulk, 'max_deletes_per_request', 9):
             with patch.object(self.bulk, 'max_path_length', 1):
-                req_body = '\n'.join([str(i) for i in xrange(10)])
+                req_body = '\n'.join([str(i) for i in range(10)])
                 req = Request.blank('/delete_works/AUTH_Acc', body=req_body)
                 self.assertRaises(
                     HTTPException, self.bulk.get_objs_to_delete, req)
@@ -724,21 +727,21 @@ class TestDelete(unittest.TestCase):
                             headers={'Accept': 'application/json'})
         req.method = 'POST'
         resp_body = self.handle_delete_and_iter(req)
-        self.assertEquals(
+        self.assertEqual(
             self.app.delete_paths,
             ['/delete_works/AUTH_Acc/c/f',
              '/delete_works/AUTH_Acc/c/f404',
              '/delete_works/AUTH_Acc/c/%25'])
-        self.assertEquals(self.app.calls, 3)
+        self.assertEqual(self.app.calls, 3)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Number Deleted'], 2)
-        self.assertEquals(resp_data['Number Not Found'], 1)
+        self.assertEqual(resp_data['Number Deleted'], 2)
+        self.assertEqual(resp_data['Number Not Found'], 1)
 
     def test_bulk_delete_too_many_newlines(self):
         req = Request.blank('/delete_works/AUTH_Acc')
         req.method = 'POST'
-        data = '\n\n' * self.bulk.max_deletes_per_request
-        req.environ['wsgi.input'] = StringIO(data)
+        data = b'\n\n' * self.bulk.max_deletes_per_request
+        req.environ['wsgi.input'] = BytesIO(data)
         req.content_length = len(data)
         resp_body = self.handle_delete_and_iter(req)
         self.assertTrue('413 Request Entity Too Large' in resp_body)
@@ -751,19 +754,20 @@ class TestDelete(unittest.TestCase):
                             headers={'Accept': 'application/json'})
         req.method = 'POST'
         resp_body = self.handle_delete_and_iter(req)
-        self.assertEquals(
+        self.assertEqual(
             self.app.delete_paths,
             ['/delete_works/AUTH_Acc/c/ obj \xe2\x99\xa1',
              '/delete_works/AUTH_Acc/c/ objbadutf8'])
 
-        self.assertEquals(self.app.calls, 2)
+        self.assertEqual(self.app.calls, 2)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Number Deleted'], 1)
-        self.assertEquals(len(resp_data['Errors']), 2)
-        self.assertEquals(
-            resp_data['Errors'],
-            [[urllib.quote('c/ objbadutf8'), '412 Precondition Failed'],
-             [urllib.quote('/c/f\xdebadutf8'), '412 Precondition Failed']])
+        self.assertEqual(resp_data['Number Deleted'], 1)
+        self.assertEqual(len(resp_data['Errors']), 2)
+        self.assertEqual(resp_data['Errors'],
+                         [[urllib.parse.quote('c/ objbadutf8'),
+                           '412 Precondition Failed'],
+                          [urllib.parse.quote('/c/f\xdebadutf8'),
+                           '412 Precondition Failed']])
 
     def test_bulk_delete_no_body(self):
         req = Request.blank('/unauth/AUTH_acc/')
@@ -780,11 +784,11 @@ class TestDelete(unittest.TestCase):
                             headers={'Accept': 'application/json'})
         req.method = 'POST'
         resp_body = self.handle_delete_and_iter(req)
-        self.assertEquals(self.app.calls, 2)
+        self.assertEqual(self.app.calls, 2)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Errors'], [['/c/f', '401 Unauthorized']])
-        self.assertEquals(resp_data['Response Status'], '400 Bad Request')
-        self.assertEquals(resp_data['Number Deleted'], 1)
+        self.assertEqual(resp_data['Errors'], [['/c/f', '401 Unauthorized']])
+        self.assertEqual(resp_data['Response Status'], '400 Bad Request')
+        self.assertEqual(resp_data['Number Deleted'], 1)
 
     def test_bulk_delete_500_resp(self):
         req = Request.blank('/broke/AUTH_acc/', body='/c/f\nc/f2\n',
@@ -792,10 +796,10 @@ class TestDelete(unittest.TestCase):
         req.method = 'POST'
         resp_body = self.handle_delete_and_iter(req)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(
+        self.assertEqual(
             resp_data['Errors'],
             [['/c/f', '500 Internal Error'], ['c/f2', '500 Internal Error']])
-        self.assertEquals(resp_data['Response Status'], '502 Bad Gateway')
+        self.assertEqual(resp_data['Response Status'], '502 Bad Gateway')
 
     def test_bulk_delete_bad_path(self):
         req = Request.blank('/delete_cont_fail/')
@@ -811,10 +815,10 @@ class TestDelete(unittest.TestCase):
                                       return_value=None)) as mock_sleep:
             resp_body = self.handle_delete_and_iter(req)
             resp_data = utils.json.loads(resp_body)
-            self.assertEquals(resp_data['Number Deleted'], 0)
-            self.assertEquals(resp_data['Errors'], [['c', '409 Conflict']])
-            self.assertEquals(resp_data['Response Status'], '400 Bad Request')
-            self.assertEquals([], mock_sleep.call_args_list)
+            self.assertEqual(resp_data['Number Deleted'], 0)
+            self.assertEqual(resp_data['Errors'], [['c', '409 Conflict']])
+            self.assertEqual(resp_data['Response Status'], '400 Bad Request')
+            self.assertEqual([], mock_sleep.call_args_list)
 
     def test_bulk_delete_container_delete_retry_and_fails(self):
         self.bulk.retry_count = 3
@@ -826,13 +830,13 @@ class TestDelete(unittest.TestCase):
                                       return_value=None)) as mock_sleep:
             resp_body = self.handle_delete_and_iter(req)
             resp_data = utils.json.loads(resp_body)
-            self.assertEquals(resp_data['Number Deleted'], 0)
-            self.assertEquals(resp_data['Errors'], [['c', '409 Conflict']])
-            self.assertEquals(resp_data['Response Status'], '400 Bad Request')
-            self.assertEquals([call(self.bulk.retry_interval),
-                               call(self.bulk.retry_interval ** 2),
-                               call(self.bulk.retry_interval ** 3)],
-                              mock_sleep.call_args_list)
+            self.assertEqual(resp_data['Number Deleted'], 0)
+            self.assertEqual(resp_data['Errors'], [['c', '409 Conflict']])
+            self.assertEqual(resp_data['Response Status'], '400 Bad Request')
+            self.assertEqual([call(self.bulk.retry_interval),
+                              call(self.bulk.retry_interval ** 2),
+                              call(self.bulk.retry_interval ** 3)],
+                             mock_sleep.call_args_list)
 
     def test_bulk_delete_container_delete_retry_and_success(self):
         self.bulk.retry_count = 3
@@ -845,26 +849,26 @@ class TestDelete(unittest.TestCase):
                                       return_value=None)) as mock_sleep:
             resp_body = self.handle_delete_and_iter(req)
             resp_data = utils.json.loads(resp_body)
-            self.assertEquals(resp_data['Number Deleted'], 1)
-            self.assertEquals(resp_data['Errors'], [])
-            self.assertEquals(resp_data['Response Status'], '200 OK')
-            self.assertEquals([call(self.bulk.retry_interval),
-                               call(self.bulk.retry_interval ** 2)],
-                              mock_sleep.call_args_list)
+            self.assertEqual(resp_data['Number Deleted'], 1)
+            self.assertEqual(resp_data['Errors'], [])
+            self.assertEqual(resp_data['Response Status'], '200 OK')
+            self.assertEqual([call(self.bulk.retry_interval),
+                              call(self.bulk.retry_interval ** 2)],
+                             mock_sleep.call_args_list)
 
     def test_bulk_delete_bad_file_too_long(self):
         req = Request.blank('/delete_works/AUTH_Acc',
                             headers={'Accept': 'application/json'})
         req.method = 'POST'
         bad_file = 'c/' + ('1' * self.bulk.max_path_length)
-        data = '/c/f\n' + bad_file + '\n/c/f'
-        req.environ['wsgi.input'] = StringIO(data)
+        data = b'/c/f\n' + bad_file.encode('ascii') + b'\n/c/f'
+        req.environ['wsgi.input'] = BytesIO(data)
         req.headers['Transfer-Encoding'] = 'chunked'
         resp_body = self.handle_delete_and_iter(req)
         resp_data = utils.json.loads(resp_body)
-        self.assertEquals(resp_data['Number Deleted'], 2)
-        self.assertEquals(resp_data['Errors'], [[bad_file, '400 Bad Request']])
-        self.assertEquals(resp_data['Response Status'], '400 Bad Request')
+        self.assertEqual(resp_data['Number Deleted'], 2)
+        self.assertEqual(resp_data['Errors'], [[bad_file, '400 Bad Request']])
+        self.assertEqual(resp_data['Response Status'], '400 Bad Request')
 
     def test_bulk_delete_bad_file_over_twice_max_length(self):
         body = '/c/f\nc/' + ('123456' * self.bulk.max_path_length) + '\n'
@@ -879,14 +883,14 @@ class TestDelete(unittest.TestCase):
         req.method = 'POST'
         with patch.object(self.bulk, 'max_failed_deletes', 2):
             resp_body = self.handle_delete_and_iter(req)
-            self.assertEquals(self.app.calls, 2)
+            self.assertEqual(self.app.calls, 2)
             resp_data = utils.json.loads(resp_body)
-            self.assertEquals(resp_data['Response Status'], '400 Bad Request')
-            self.assertEquals(resp_data['Response Body'],
-                              'Max delete failures exceeded')
-            self.assertEquals(resp_data['Errors'],
-                              [['/c/f1', '401 Unauthorized'],
-                               ['/c/f2', '401 Unauthorized']])
+            self.assertEqual(resp_data['Response Status'], '400 Bad Request')
+            self.assertEqual(resp_data['Response Body'],
+                             'Max delete failures exceeded')
+            self.assertEqual(resp_data['Errors'],
+                             [['/c/f1', '401 Unauthorized'],
+                              ['/c/f2', '401 Unauthorized']])
 
 
 class TestSwiftInfo(unittest.TestCase):

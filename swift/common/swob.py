@@ -35,21 +35,23 @@ place to keep Swift working every time webob decides some interface
 needs to change.
 """
 
-from collections import defaultdict
-from StringIO import StringIO
-import UserDict
+from collections import defaultdict, MutableMapping
 import time
 from functools import partial
 from datetime import datetime, timedelta, tzinfo
 from email.utils import parsedate
-import urlparse
-import urllib2
 import re
 import random
 import functools
 import inspect
 
-from swift.common.utils import reiterate, split_path, Timestamp, pairs
+import six
+from six import BytesIO
+from six import StringIO
+from six.moves import urllib
+
+from swift.common.utils import reiterate, split_path, Timestamp, pairs, \
+    close_if_possible
 from swift.common.exceptions import InvalidTimestamp
 
 
@@ -128,10 +130,10 @@ class _UTC(tzinfo):
 UTC = _UTC()
 
 
-class WsgiStringIO(StringIO):
+class WsgiBytesIO(BytesIO):
     """
     This class adds support for the additional wsgi.input methods defined on
-    eventlet.wsgi.Input to the StringIO class which would otherwise be a fine
+    eventlet.wsgi.Input to the BytesIO class which would otherwise be a fine
     stand-in for the file-like object in the WSGI environment.
     """
 
@@ -215,7 +217,7 @@ def _header_int_property(header):
                     doc="Retrieve and set the %s header as an int" % header)
 
 
-class HeaderEnvironProxy(UserDict.DictMixin):
+class HeaderEnvironProxy(MutableMapping):
     """
     A dict-like object that proxies requests to a wsgi environ,
     rewriting header keys to environ keys.
@@ -225,6 +227,13 @@ class HeaderEnvironProxy(UserDict.DictMixin):
     """
     def __init__(self, environ):
         self.environ = environ
+
+    def __iter__(self):
+        for k in self.keys():
+            yield k
+
+    def __len__(self):
+        return len(self.keys())
 
     def _normalize(self, key):
         key = 'HTTP_' + key.replace('-', '_').upper()
@@ -240,7 +249,7 @@ class HeaderEnvironProxy(UserDict.DictMixin):
     def __setitem__(self, key, value):
         if value is None:
             self.environ.pop(self._normalize(key), None)
-        elif isinstance(value, unicode):
+        elif isinstance(value, six.text_type):
             self.environ[self._normalize(key)] = value.encode('utf-8')
         else:
             self.environ[self._normalize(key)] = str(value)
@@ -285,7 +294,7 @@ class HeaderKeyDict(dict):
     def __setitem__(self, key, value):
         if value is None:
             self.pop(key.title(), None)
-        elif isinstance(value, unicode):
+        elif isinstance(value, six.text_type):
             return dict.__setitem__(self, key.title(), value.encode('utf-8'))
         else:
             return dict.__setitem__(self, key.title(), str(value))
@@ -324,7 +333,7 @@ def _resp_status_property():
             self.status_int = value
             self.explanation = self.title = RESPONSE_REASONS[value][0]
         else:
-            if isinstance(value, unicode):
+            if isinstance(value, six.text_type):
                 value = value.encode('utf-8')
             self.status_int = int(value.split(' ', 1)[0])
             self.explanation = self.title = value.split(' ', 1)[1]
@@ -349,7 +358,7 @@ def _resp_body_property():
         return self._body
 
     def setter(self, value):
-        if isinstance(value, unicode):
+        if isinstance(value, six.text_type):
             value = value.encode('utf-8')
         if isinstance(value, str):
             self.content_length = len(value)
@@ -477,8 +486,8 @@ class Range(object):
     After initialization, "range.ranges" is populated with a list
     of (start, end) tuples denoting the requested ranges.
 
-    If there were any syntactically-invalid byte-range-spec values,
-    "range.ranges" will be an empty list, per the relevant RFC:
+    If there were any syntactically-invalid byte-range-spec values, the
+    constructor will raise a ValueError, per the relevant RFC:
 
     "The recipient of a byte-range-set that includes one or more syntactically
     invalid byte-range-spec values MUST ignore the header field that includes
@@ -745,7 +754,7 @@ def _req_environ_property(environ_field):
         return self.environ.get(environ_field, None)
 
     def setter(self, value):
-        if isinstance(value, unicode):
+        if isinstance(value, six.text_type):
             self.environ[environ_field] = value.encode('utf-8')
         else:
             self.environ[environ_field] = value
@@ -757,16 +766,16 @@ def _req_environ_property(environ_field):
 def _req_body_property():
     """
     Set and retrieve the Request.body parameter.  It consumes wsgi.input and
-    returns the results.  On assignment, uses a WsgiStringIO to create a new
+    returns the results.  On assignment, uses a WsgiBytesIO to create a new
     wsgi.input.
     """
     def getter(self):
         body = self.environ['wsgi.input'].read()
-        self.environ['wsgi.input'] = WsgiStringIO(body)
+        self.environ['wsgi.input'] = WsgiBytesIO(body)
         return body
 
     def setter(self, value):
-        self.environ['wsgi.input'] = WsgiStringIO(value)
+        self.environ['wsgi.input'] = WsgiBytesIO(value)
         self.environ['CONTENT_LENGTH'] = str(len(value))
 
     return property(getter, setter, doc="Get and set the request body str")
@@ -834,14 +843,14 @@ class Request(object):
         :param path: encoded, parsed, and unquoted into PATH_INFO
         :param environ: WSGI environ dictionary
         :param headers: HTTP headers
-        :param body: stuffed in a WsgiStringIO and hung on wsgi.input
+        :param body: stuffed in a WsgiBytesIO and hung on wsgi.input
         :param kwargs: any environ key with an property setter
         """
         headers = headers or {}
         environ = environ or {}
-        if isinstance(path, unicode):
+        if isinstance(path, six.text_type):
             path = path.encode('utf-8')
-        parsed_path = urlparse.urlparse(path)
+        parsed_path = urllib.parse.urlparse(path)
         server_name = 'localhost'
         if parsed_path.netloc:
             server_name = parsed_path.netloc.split(':', 1)[0]
@@ -856,25 +865,25 @@ class Request(object):
             'REQUEST_METHOD': 'GET',
             'SCRIPT_NAME': '',
             'QUERY_STRING': parsed_path.query,
-            'PATH_INFO': urllib2.unquote(parsed_path.path),
+            'PATH_INFO': urllib.parse.unquote(parsed_path.path),
             'SERVER_NAME': server_name,
             'SERVER_PORT': str(server_port),
             'HTTP_HOST': '%s:%d' % (server_name, server_port),
             'SERVER_PROTOCOL': 'HTTP/1.0',
             'wsgi.version': (1, 0),
             'wsgi.url_scheme': parsed_path.scheme or 'http',
-            'wsgi.errors': StringIO(''),
+            'wsgi.errors': StringIO(),
             'wsgi.multithread': False,
             'wsgi.multiprocess': False
         }
         env.update(environ)
         if body is not None:
-            env['wsgi.input'] = WsgiStringIO(body)
+            env['wsgi.input'] = WsgiBytesIO(body)
             env['CONTENT_LENGTH'] = str(len(body))
         elif 'wsgi.input' not in env:
-            env['wsgi.input'] = WsgiStringIO('')
+            env['wsgi.input'] = WsgiBytesIO()
         req = Request(env)
-        for key, val in headers.iteritems():
+        for key, val in headers.items():
             req.headers[key] = val
         for key, val in kwargs.items():
             prop = getattr(Request, key, None)
@@ -894,7 +903,7 @@ class Request(object):
         if self._params_cache is None:
             if 'QUERY_STRING' in self.environ:
                 self._params_cache = dict(
-                    urlparse.parse_qsl(self.environ['QUERY_STRING'], True))
+                    urllib.parse.parse_qsl(self.environ['QUERY_STRING'], True))
             else:
                 self._params_cache = {}
         return self._params_cache
@@ -927,8 +936,8 @@ class Request(object):
     @property
     def path(self):
         "Provides the full path of the request, excluding the QUERY_STRING"
-        return urllib2.quote(self.environ.get('SCRIPT_NAME', '') +
-                             self.environ['PATH_INFO'])
+        return urllib.parse.quote(self.environ.get('SCRIPT_NAME', '') +
+                                  self.environ['PATH_INFO'])
 
     @property
     def swift_entity_path(self):
@@ -979,7 +988,7 @@ class Request(object):
         env.update({
             'REQUEST_METHOD': 'GET',
             'CONTENT_LENGTH': '0',
-            'wsgi.input': WsgiStringIO(''),
+            'wsgi.input': WsgiBytesIO(),
         })
         return Request(env)
 
@@ -1089,13 +1098,14 @@ def content_range_header(start, stop, size):
 
 def multi_range_iterator(ranges, content_type, boundary, size, sub_iter_gen):
     for start, stop in ranges:
-        yield ''.join(['\r\n--', boundary, '\r\n',
+        yield ''.join(['--', boundary, '\r\n',
                        'Content-Type: ', content_type, '\r\n'])
         yield content_range_header(start, stop, size) + '\r\n\r\n'
         sub_iter = sub_iter_gen(start, stop)
         for chunk in sub_iter:
             yield chunk
-    yield '\r\n--' + boundary + '--\r\n'
+        yield '\r\n'
+    yield '--' + boundary + '--'
 
 
 class Response(object):
@@ -1125,6 +1135,7 @@ class Response(object):
         self.request = request
         self.body = body
         self.app_iter = app_iter
+        self.response_iter = None
         self.status = status
         self.boundary = "%.32x" % random.randint(0, 256 ** 16)
         if request:
@@ -1139,7 +1150,7 @@ class Response(object):
             self.headers.update(headers)
         if self.status_int == 401 and 'www-authenticate' not in self.headers:
             self.headers.update({'www-authenticate': self.www_authenticate()})
-        for key, value in kw.iteritems():
+        for key, value in kw.items():
             setattr(self, key, value)
         # When specifying both 'content_type' and 'charset' in the kwargs,
         # charset needs to be applied *after* content_type, otherwise charset
@@ -1177,21 +1188,37 @@ class Response(object):
         self.content_type = ''.join(['multipart/byteranges;',
                                      'boundary=', self.boundary])
 
-        # This section calculate the total size of the targeted response
-        # The value 12 is the length of total bytes of hyphen, new line
-        # form feed for each section header. The value 8 is the length of
-        # total bytes of hyphen, new line, form feed characters for the
-        # closing boundary which appears only once
-        section_header_fixed_len = 12 + (len(self.boundary) +
-                                         len('Content-Type: ') +
-                                         len(content_type) +
-                                         len('Content-Range: bytes '))
+        # This section calculates the total size of the response.
+        section_header_fixed_len = (
+            # --boundary\r\n
+            len(self.boundary) + 4
+            # Content-Type: <type>\r\n
+            + len('Content-Type: ') + len(content_type) + 2
+            # Content-Range: <value>\r\n; <value> accounted for later
+            + len('Content-Range: ') + 2
+            # \r\n at end of headers
+            + 2)
+
         body_size = 0
         for start, end in ranges:
             body_size += section_header_fixed_len
-            body_size += len(str(start) + '-' + str(end - 1) + '/' +
-                             str(content_size)) + (end - start)
-        body_size += 8 + len(self.boundary)
+
+            # length of the value of Content-Range, not including the \r\n
+            # since that's already accounted for
+            cr = content_range_header_value(start, end, content_size)
+            body_size += len(cr)
+
+            # the actual bytes (note: this range is half-open, i.e. begins
+            # with byte <start> and ends with byte <end - 1>, so there's no
+            # fencepost error here)
+            body_size += (end - start)
+
+            # \r\n prior to --boundary
+            body_size += 2
+
+        # --boundary-- terminates the message
+        body_size += len(self.boundary) + 4
+
         self.content_length = body_size
         self.content_range = None
         return content_size, content_type
@@ -1203,12 +1230,14 @@ class Response(object):
                     etag in self.request.if_none_match:
                 self.status = 304
                 self.content_length = 0
+                close_if_possible(app_iter)
                 return ['']
 
             if etag and self.request.if_match and \
                etag not in self.request.if_match:
                 self.status = 412
                 self.content_length = 0
+                close_if_possible(app_iter)
                 return ['']
 
             if self.status_int == 404 and self.request.if_match \
@@ -1219,18 +1248,21 @@ class Response(object):
                 # Failed) response. [RFC 2616 section 14.24]
                 self.status = 412
                 self.content_length = 0
+                close_if_possible(app_iter)
                 return ['']
 
             if self.last_modified and self.request.if_modified_since \
                and self.last_modified <= self.request.if_modified_since:
                 self.status = 304
                 self.content_length = 0
+                close_if_possible(app_iter)
                 return ['']
 
             if self.last_modified and self.request.if_unmodified_since \
                and self.last_modified > self.request.if_unmodified_since:
                 self.status = 412
                 self.content_length = 0
+                close_if_possible(app_iter)
                 return ['']
 
         if self.request and self.request.method == 'HEAD':
@@ -1244,6 +1276,7 @@ class Response(object):
             if ranges == []:
                 self.status = 416
                 self.content_length = 0
+                close_if_possible(app_iter)
                 return ['']
             elif ranges:
                 range_size = len(ranges)
@@ -1291,12 +1324,23 @@ class Response(object):
         if self.status_int in RESPONSE_REASONS:
             title, exp = RESPONSE_REASONS[self.status_int]
             if exp:
-                body = '<html><h1>%s</h1><p>%s</p></html>' % (title, exp)
-                if '%(' in body:
-                    body = body % defaultdict(lambda: 'unknown', self.__dict__)
+                body = '<html><h1>%s</h1><p>%s</p></html>' % (
+                    title,
+                    exp % defaultdict(lambda: 'unknown', self.__dict__))
                 self.content_length = len(body)
                 return [body]
         return ['']
+
+    def fix_conditional_response(self):
+        """
+        You may call this once you have set the content_length to the whole
+        object length and body or app_iter to reset the content_length
+        properties on the request.
+
+        It is ok to not call this method, the conditional resposne will be
+        maintained for you when you __call__ the response.
+        """
+        self.response_iter = self._response_iter(self.app_iter, self._body)
 
     def absolute_location(self):
         """
@@ -1319,7 +1363,7 @@ class Response(object):
                 realm = 'unknown'
         except (AttributeError, ValueError):
             realm = 'unknown'
-        return 'Swift realm="%s"' % urllib2.quote(realm)
+        return 'Swift realm="%s"' % urllib.parse.quote(realm)
 
     @property
     def is_success(self):
@@ -1348,12 +1392,15 @@ class Response(object):
         if not self.request:
             self.request = Request(env)
         self.environ = env
-        app_iter = self._response_iter(self.app_iter, self._body)
+
+        if not self.response_iter:
+            self.response_iter = self._response_iter(self.app_iter, self._body)
+
         if 'location' in self.headers and \
                 not env.get('swift.leave_relative_location'):
             self.location = self.absolute_location()
         start_response(self.status, self.headers.items())
-        return app_iter
+        return self.response_iter
 
 
 class HTTPException(Response, Exception):

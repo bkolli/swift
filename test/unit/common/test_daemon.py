@@ -16,10 +16,10 @@
 # TODO(clayg): Test kill_children signal handlers
 
 import os
+from six import StringIO
 import unittest
 from getpass import getuser
 import logging
-from StringIO import StringIO
 from test.unit import tmpfile
 from mock import patch
 
@@ -51,8 +51,8 @@ class TestDaemon(unittest.TestCase):
 
     def test_create(self):
         d = daemon.Daemon({})
-        self.assertEquals(d.conf, {})
-        self.assert_(isinstance(d.logger, utils.LogAdapter))
+        self.assertEqual(d.conf, {})
+        self.assertTrue(isinstance(d.logger, utils.LogAdapter))
 
     def test_stubs(self):
         d = daemon.Daemon({})
@@ -77,20 +77,20 @@ class TestRunDaemon(unittest.TestCase):
         self.assertFalse(MyDaemon.once_called)
         # test default
         d.run()
-        self.assertEquals(d.forever_called, True)
+        self.assertEqual(d.forever_called, True)
         # test once
         d.run(once=True)
-        self.assertEquals(d.once_called, True)
+        self.assertEqual(d.once_called, True)
 
     def test_run_daemon(self):
         sample_conf = "[my-daemon]\nuser = %s\n" % getuser()
         with tmpfile(sample_conf) as conf_file:
             with patch.dict('os.environ', {'TZ': ''}):
                 daemon.run_daemon(MyDaemon, conf_file)
-                self.assertEquals(MyDaemon.forever_called, True)
-                self.assert_(os.environ['TZ'] is not '')
+                self.assertEqual(MyDaemon.forever_called, True)
+                self.assertTrue(os.environ['TZ'] is not '')
             daemon.run_daemon(MyDaemon, conf_file, once=True)
-            self.assertEquals(MyDaemon.once_called, True)
+            self.assertEqual(MyDaemon.once_called, True)
 
             # test raise in daemon code
             MyDaemon.run_once = MyDaemon.run_raise
@@ -104,7 +104,7 @@ class TestRunDaemon(unittest.TestCase):
             logger.addHandler(logging.StreamHandler(sio))
             logger = utils.get_logger(None, 'server', log_route='server')
             daemon.run_daemon(MyDaemon, conf_file, logger=logger)
-            self.assert_('user quit' in sio.getvalue().lower())
+            self.assertTrue('user quit' in sio.getvalue().lower())
 
 
 if __name__ == '__main__':

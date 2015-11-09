@@ -1,4 +1,4 @@
-#-*- coding:utf-8 -*-
+# coding: utf-8
 # Copyright (c) 2013 OpenStack Foundation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
 import hashlib
 import json
 import mock
@@ -26,6 +25,7 @@ import unittest
 
 from swift.common import exceptions, swob
 from swift.common.middleware import dlo
+from swift.common.utils import closing_if_possible
 from test.unit.common.middleware.helpers import FakeSwift
 
 
@@ -54,8 +54,10 @@ class DloTestCase(unittest.TestCase):
         body = ''
         caught_exc = None
         try:
-            for chunk in body_iter:
-                body += chunk
+            # appease the close-checker
+            with closing_if_possible(body_iter):
+                for chunk in body_iter:
+                    body += chunk
         except Exception as exc:
             if expect_exception:
                 caught_exc = exc
@@ -279,6 +281,9 @@ class TestDloHeadManifest(DloTestCase):
 
 
 class TestDloGetManifest(DloTestCase):
+    def tearDown(self):
+        self.assertEqual(self.app.unclosed_requests, {})
+
     def test_get_manifest(self):
         expected_etag = '"%s"' % md5hex(
             md5hex("aaaaa") + md5hex("bbbbb") + md5hex("ccccc") +
@@ -695,12 +700,11 @@ class TestDloGetManifest(DloTestCase):
             '/v1/AUTH_test/mancon/manifest',
             environ={'REQUEST_METHOD': 'GET'})
 
-        with contextlib.nested(
-                mock.patch('swift.common.request_helpers.time.time',
-                           mock_time),
+        with mock.patch('swift.common.request_helpers.time.time',
+                        mock_time), \
                 mock.patch('swift.common.request_helpers.is_success',
-                           mock_is_success),
-                mock.patch.object(dlo, 'is_success', mock_is_success)):
+                           mock_is_success), \
+                mock.patch.object(dlo, 'is_success', mock_is_success):
             status, headers, body, exc = self.call_dlo(
                 req, expect_exception=True)
 
@@ -787,7 +791,7 @@ class TestDloGetManifest(DloTestCase):
     def test_get_with_auth_overridden(self):
         auth_got_called = [0]
 
-        def my_auth():
+        def my_auth(req):
             auth_got_called[0] += 1
             return None
 

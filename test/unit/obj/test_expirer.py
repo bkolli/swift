@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import urllib
 from time import time
 from unittest import main, TestCase
 from test.unit import FakeRing, mocked_http_conn, debug_logger
@@ -22,6 +21,8 @@ from tempfile import mkdtemp
 from shutil import rmtree
 
 import mock
+import six
+from six.moves import urllib
 
 from swift.common import internal_client, utils
 from swift.obj import expirer
@@ -153,10 +154,11 @@ class TestObjectExpirer(TestCase):
                     sum([len(self.containers[x]) for x in self.containers])
 
             def iter_containers(self, *a, **kw):
-                return [{'name': unicode(x)} for x in self.containers.keys()]
+                return [{'name': six.text_type(x)}
+                        for x in self.containers.keys()]
 
             def iter_objects(self, account, container):
-                return [{'name': unicode(x)}
+                return [{'name': six.text_type(x)}
                         for x in self.containers[container]]
 
             def delete_container(*a, **kw):
@@ -172,7 +174,7 @@ class TestObjectExpirer(TestCase):
         x.swift = InternalClient(containers)
 
         deleted_objects = {}
-        for i in xrange(3):
+        for i in range(3):
             x.process = i
             x.run_once()
             self.assertNotEqual(deleted_objects, x.deleted_objects)
@@ -525,7 +527,7 @@ class TestObjectExpirer(TestCase):
         got_unicode = [False]
 
         def delete_actual_object_test_for_unicode(actual_obj, timestamp):
-            if isinstance(actual_obj, unicode):
+            if isinstance(actual_obj, six.text_type):
                 got_unicode[0] = True
 
         fake_swift = InternalClient(
@@ -742,9 +744,9 @@ class TestObjectExpirer(TestCase):
         x = expirer.ObjectExpirer({})
         x.swift.make_request = mock.MagicMock()
         x.delete_actual_object(name, timestamp)
-        x.swift.make_request.assert_called_once()
+        self.assertEqual(x.swift.make_request.call_count, 1)
         self.assertEqual(x.swift.make_request.call_args[0][1],
-                         '/v1/' + urllib.quote(name))
+                         '/v1/' + urllib.parse.quote(name))
 
     def test_pop_queue(self):
         class InternalClient(object):

@@ -44,7 +44,7 @@ version is at:
 http://github.com/memcached/memcached/blob/1.4.2/doc/protocol.txt
 """
 
-import cPickle as pickle
+import six.moves.cPickle as pickle
 import logging
 import time
 from bisect import bisect
@@ -54,6 +54,7 @@ from hashlib import md5
 from eventlet.green import socket
 from eventlet.pools import Pool
 from eventlet import Timeout
+from six.moves import range
 
 from swift.common.utils import json
 
@@ -140,7 +141,7 @@ class MemcacheRing(object):
         self._errors = dict(((serv, []) for serv in servers))
         self._error_limited = dict(((serv, 0) for serv in servers))
         for server in sorted(servers):
-            for i in xrange(NODE_WEIGHT):
+            for i in range(NODE_WEIGHT):
                 self._ring[md5hash('%s-%s' % (server, i))] = server
         self._tries = tries if tries <= len(servers) else len(servers)
         self._sorted = sorted(self._ring)
@@ -426,7 +427,7 @@ class MemcacheRing(object):
         server_key = md5hash(server_key)
         timeout = sanitize_timeout(time or timeout)
         msg = ''
-        for key, value in mapping.iteritems():
+        for key, value in mapping.items():
             key = md5hash(key)
             flags = 0
             if serialize and self._allow_pickle:
@@ -442,7 +443,7 @@ class MemcacheRing(object):
                 with Timeout(self._io_timeout):
                     sock.sendall(msg)
                     # Wait for the set to complete
-                    for _ in range(len(mapping)):
+                    for line in range(len(mapping)):
                         fp.readline()
                     self._return_conn(server, fp, sock)
                     return

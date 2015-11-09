@@ -64,10 +64,10 @@ class TestSplice(unittest.TestCase):
     def test_flags(self):
         '''Test flag attribute availability'''
 
-        self.assert_(hasattr(splice, 'SPLICE_F_MOVE'))
-        self.assert_(hasattr(splice, 'SPLICE_F_NONBLOCK'))
-        self.assert_(hasattr(splice, 'SPLICE_F_MORE'))
-        self.assert_(hasattr(splice, 'SPLICE_F_GIFT'))
+        self.assertTrue(hasattr(splice, 'SPLICE_F_MOVE'))
+        self.assertTrue(hasattr(splice, 'SPLICE_F_NONBLOCK'))
+        self.assertTrue(hasattr(splice, 'SPLICE_F_MORE'))
+        self.assertTrue(hasattr(splice, 'SPLICE_F_GIFT'))
 
     @mock.patch('swift.common.splice.splice._c_splice', None)
     def test_available(self):
@@ -104,7 +104,7 @@ class TestSplice(unittest.TestCase):
                 self.assertEqual(res, (3, 6, None))
                 self.assertEqual(os.lseek(fd.fileno(), 0, os.SEEK_CUR), 0)
 
-                self.assertEquals(os.read(pa, 6), 'abcdef')
+                self.assertEqual(os.read(pa, 6), 'abcdef')
 
     def test_splice_pipe_to_file(self):
         '''Test `splice` from a pipe to a file'''

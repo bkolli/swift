@@ -16,16 +16,18 @@
 from eventlet import sleep, Timeout
 from eventlet.green import httplib, socket, urllib2
 import json
+import six
+from six.moves import range
+from six.moves import urllib
 import struct
 from sys import exc_info
 import zlib
 from swift import gettext_ as _
 from time import gmtime, strftime, time
-import urlparse
 from zlib import compressobj
 
 from swift.common.utils import quote
-from swift.common.http import HTTP_NOT_FOUND
+from swift.common.http import HTTP_NOT_FOUND, HTTP_MULTIPLE_CHOICES
 from swift.common.swob import Request
 from swift.common.wsgi import loadapp, pipeline_property
 
@@ -171,7 +173,7 @@ class InternalClient(object):
         headers = dict(headers)
         headers['user-agent'] = self.user_agent
         resp = exc_type = exc_value = exc_traceback = None
-        for attempt in xrange(self.request_tries):
+        for attempt in range(self.request_tries):
             req = Request.blank(
                 path, environ={'REQUEST_METHOD': method}, headers=headers)
             if body_file is not None:
@@ -193,7 +195,7 @@ class InternalClient(object):
                 _('Unexpected response: %s') % resp.status, resp)
         if exc_type:
             # To make pep8 tool happy, in place of raise t, v, tb:
-            raise exc_type(*exc_value.args), None, exc_traceback
+            six.reraise(exc_type(*exc_value.args), None, exc_traceback)
 
     def _get_metadata(
             self, path, metadata_prefix='', acceptable_statuses=(2,),
@@ -223,7 +225,7 @@ class InternalClient(object):
         resp = self.make_request('HEAD', path, headers, acceptable_statuses)
         metadata_prefix = metadata_prefix.lower()
         metadata = {}
-        for k, v in resp.headers.iteritems():
+        for k, v in resp.headers.items():
             if k.lower().startswith(metadata_prefix):
                 metadata[k[len(metadata_prefix):].lower()] = v
         return metadata
@@ -254,6 +256,8 @@ class InternalClient(object):
                 (path, quote(marker), quote(end_marker)),
                 {}, acceptable_statuses)
             if not resp.status_int == 200:
+                if resp.status_int >= HTTP_MULTIPLE_CHOICES:
+                    ''.join(resp.app_iter)
                 break
             data = json.loads(resp.body)
             if not data:
@@ -307,7 +311,7 @@ class InternalClient(object):
         """
 
         headers = {}
-        for k, v in metadata.iteritems():
+        for k, v in metadata.items():
             if k.lower().startswith(metadata_prefix):
                 headers[k] = v
             else:
@@ -759,7 +763,7 @@ class SimpleClient(object):
 
         req = urllib2.Request(url, headers=headers, data=contents)
         if proxy:
-            proxy = urlparse.urlparse(proxy)
+            proxy = urllib.parse.urlparse(proxy)
             req.set_proxy(proxy.netloc, proxy.scheme)
         req.get_method = lambda: method
         conn = urllib2.urlopen(req, timeout=timeout)

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import array
-import cPickle as pickle
+import six.moves.cPickle as pickle
 import os
 import sys
 import unittest
@@ -24,6 +24,8 @@ from gzip import GzipFile
 from tempfile import mkdtemp
 from shutil import rmtree
 from time import sleep, time
+
+from six.moves import range
 
 from swift.common import ring, utils
 
@@ -52,10 +54,10 @@ class TestRingData(unittest.TestCase):
         rmtree(self.testdir, ignore_errors=1)
 
     def assert_ring_data_equal(self, rd_expected, rd_got):
-        self.assertEquals(rd_expected._replica2part2dev_id,
-                          rd_got._replica2part2dev_id)
-        self.assertEquals(rd_expected.devs, rd_got.devs)
-        self.assertEquals(rd_expected._part_shift, rd_got._part_shift)
+        self.assertEqual(rd_expected._replica2part2dev_id,
+                         rd_got._replica2part2dev_id)
+        self.assertEqual(rd_expected.devs, rd_got.devs)
+        self.assertEqual(rd_expected._part_shift, rd_got._part_shift)
 
     def test_attrs(self):
         r2p2d = [[0, 1, 0, 1], [0, 1, 0, 1]]
@@ -63,9 +65,9 @@ class TestRingData(unittest.TestCase):
              {'id': 1, 'zone': 1, 'region': 1, 'ip': '10.1.1.1', 'port': 7000}]
         s = 30
         rd = ring.RingData(r2p2d, d, s)
-        self.assertEquals(rd._replica2part2dev_id, r2p2d)
-        self.assertEquals(rd.devs, d)
-        self.assertEquals(rd._part_shift, s)
+        self.assertEqual(rd._replica2part2dev_id, r2p2d)
+        self.assertEqual(rd.devs, d)
+        self.assertEqual(rd._part_shift, s)
 
     def test_can_load_pickled_ring_data(self):
         rd = ring.RingData(
@@ -74,9 +76,18 @@ class TestRingData(unittest.TestCase):
              {'id': 1, 'zone': 1, 'ip': '10.1.1.1', 'port': 7000}],
             30)
         ring_fname = os.path.join(self.testdir, 'foo.ring.gz')
-        for p in xrange(pickle.HIGHEST_PROTOCOL):
+        for p in range(pickle.HIGHEST_PROTOCOL):
             with closing(GzipFile(ring_fname, 'wb')) as f:
                 pickle.dump(rd, f, protocol=p)
+            meta_only = ring.RingData.load(ring_fname, metadata_only=True)
+            self.assertEqual([
+                {'id': 0, 'zone': 0, 'region': 1, 'ip': '10.1.1.0',
+                 'port': 7000},
+                {'id': 1, 'zone': 1, 'region': 1, 'ip': '10.1.1.1',
+                 'port': 7000},
+            ], meta_only.devs)
+            # Pickled rings can't load only metadata, so you get it all
+            self.assert_ring_data_equal(rd, meta_only)
             ring_data = ring.RingData.load(ring_fname)
             self.assert_ring_data_equal(rd, ring_data)
 
@@ -86,6 +97,12 @@ class TestRingData(unittest.TestCase):
             [array.array('H', [0, 1, 0, 1]), array.array('H', [0, 1, 0, 1])],
             [{'id': 0, 'zone': 0}, {'id': 1, 'zone': 1}], 30)
         rd.save(ring_fname)
+        meta_only = ring.RingData.load(ring_fname, metadata_only=True)
+        self.assertEqual([
+            {'id': 0, 'zone': 0, 'region': 1},
+            {'id': 1, 'zone': 1, 'region': 1},
+        ], meta_only.devs)
+        self.assertEqual([], meta_only._replica2part2dev_id)
         rd2 = ring.RingData.load(ring_fname)
         self.assert_ring_data_equal(rd, rd2)
 
@@ -163,12 +180,12 @@ class TestRing(TestRingBase):
         rmtree(self.testdir, ignore_errors=1)
 
     def test_creation(self):
-        self.assertEquals(self.ring._replica2part2dev_id,
-                          self.intended_replica2part2dev_id)
-        self.assertEquals(self.ring._part_shift, self.intended_part_shift)
-        self.assertEquals(self.ring.devs, self.intended_devs)
-        self.assertEquals(self.ring.reload_time, self.intended_reload_time)
-        self.assertEquals(self.ring.serialized_path, self.testgz)
+        self.assertEqual(self.ring._replica2part2dev_id,
+                         self.intended_replica2part2dev_id)
+        self.assertEqual(self.ring._part_shift, self.intended_part_shift)
+        self.assertEqual(self.ring.devs, self.intended_devs)
+        self.assertEqual(self.ring.reload_time, self.intended_reload_time)
+        self.assertEqual(self.ring.serialized_path, self.testgz)
         # test invalid endcap
         _orig_hash_path_suffix = utils.HASH_PATH_SUFFIX
         _orig_hash_path_prefix = utils.HASH_PATH_PREFIX
@@ -184,16 +201,16 @@ class TestRing(TestRingBase):
             utils.SWIFT_CONF_FILE = _orig_swift_conf_file
 
     def test_has_changed(self):
-        self.assertEquals(self.ring.has_changed(), False)
+        self.assertEqual(self.ring.has_changed(), False)
         os.utime(self.testgz, (time() + 60, time() + 60))
-        self.assertEquals(self.ring.has_changed(), True)
+        self.assertEqual(self.ring.has_changed(), True)
 
     def test_reload(self):
         os.utime(self.testgz, (time() - 300, time() - 300))
         self.ring = ring.Ring(self.testdir, reload_time=0.001,
                               ring_name='whatever')
         orig_mtime = self.ring._mtime
-        self.assertEquals(len(self.ring.devs), 5)
+        self.assertEqual(len(self.ring.devs), 5)
         self.intended_devs.append(
             {'id': 3, 'region': 0, 'zone': 3, 'weight': 1.0,
              'ip': '10.1.1.1', 'port': 9876})
@@ -202,14 +219,14 @@ class TestRing(TestRingBase):
             self.intended_devs, self.intended_part_shift).save(self.testgz)
         sleep(0.1)
         self.ring.get_nodes('a')
-        self.assertEquals(len(self.ring.devs), 6)
-        self.assertNotEquals(self.ring._mtime, orig_mtime)
+        self.assertEqual(len(self.ring.devs), 6)
+        self.assertNotEqual(self.ring._mtime, orig_mtime)
 
         os.utime(self.testgz, (time() - 300, time() - 300))
         self.ring = ring.Ring(self.testdir, reload_time=0.001,
                               ring_name='whatever')
         orig_mtime = self.ring._mtime
-        self.assertEquals(len(self.ring.devs), 6)
+        self.assertEqual(len(self.ring.devs), 6)
         self.intended_devs.append(
             {'id': 5, 'region': 0, 'zone': 4, 'weight': 1.0,
              'ip': '10.5.5.5', 'port': 9876})
@@ -218,15 +235,15 @@ class TestRing(TestRingBase):
             self.intended_devs, self.intended_part_shift).save(self.testgz)
         sleep(0.1)
         self.ring.get_part_nodes(0)
-        self.assertEquals(len(self.ring.devs), 7)
-        self.assertNotEquals(self.ring._mtime, orig_mtime)
+        self.assertEqual(len(self.ring.devs), 7)
+        self.assertNotEqual(self.ring._mtime, orig_mtime)
 
         os.utime(self.testgz, (time() - 300, time() - 300))
         self.ring = ring.Ring(self.testdir, reload_time=0.001,
                               ring_name='whatever')
         orig_mtime = self.ring._mtime
         part, nodes = self.ring.get_nodes('a')
-        self.assertEquals(len(self.ring.devs), 7)
+        self.assertEqual(len(self.ring.devs), 7)
         self.intended_devs.append(
             {'id': 6, 'region': 0, 'zone': 5, 'weight': 1.0,
              'ip': '10.6.6.6', 'port': 6000})
@@ -234,15 +251,15 @@ class TestRing(TestRingBase):
             self.intended_replica2part2dev_id,
             self.intended_devs, self.intended_part_shift).save(self.testgz)
         sleep(0.1)
-        self.ring.get_more_nodes(part).next()
-        self.assertEquals(len(self.ring.devs), 8)
-        self.assertNotEquals(self.ring._mtime, orig_mtime)
+        next(self.ring.get_more_nodes(part))
+        self.assertEqual(len(self.ring.devs), 8)
+        self.assertNotEqual(self.ring._mtime, orig_mtime)
 
         os.utime(self.testgz, (time() - 300, time() - 300))
         self.ring = ring.Ring(self.testdir, reload_time=0.001,
                               ring_name='whatever')
         orig_mtime = self.ring._mtime
-        self.assertEquals(len(self.ring.devs), 8)
+        self.assertEqual(len(self.ring.devs), 8)
         self.intended_devs.append(
             {'id': 5, 'region': 0, 'zone': 4, 'weight': 1.0,
              'ip': '10.5.5.5', 'port': 6000})
@@ -250,8 +267,8 @@ class TestRing(TestRingBase):
             self.intended_replica2part2dev_id,
             self.intended_devs, self.intended_part_shift).save(self.testgz)
         sleep(0.1)
-        self.assertEquals(len(self.ring.devs), 9)
-        self.assertNotEquals(self.ring._mtime, orig_mtime)
+        self.assertEqual(len(self.ring.devs), 9)
+        self.assertNotEqual(self.ring._mtime, orig_mtime)
 
     def test_reload_without_replication(self):
         replication_less_devs = [{'id': 0, 'region': 0, 'zone': 0,
@@ -292,12 +309,12 @@ class TestRing(TestRingBase):
             self.testdir,
             reload_time=self.intended_reload_time,
             ring_name='without_replication')
-        self.assertEquals(self.ring.devs, intended_devs)
+        self.assertEqual(self.ring.devs, intended_devs)
 
     def test_reload_old_style_pickled_ring(self):
         devs = [{'id': 0, 'zone': 0,
-                'weight': 1.0, 'ip': '10.1.1.1',
-                'port': 6000},
+                 'weight': 1.0, 'ip': '10.1.1.1',
+                 'port': 6000},
                 {'id': 1, 'zone': 0,
                  'weight': 1.0, 'ip': '10.1.1.1',
                  'port': 6000},
@@ -344,93 +361,93 @@ class TestRing(TestRingBase):
             self.testdir,
             reload_time=self.intended_reload_time,
             ring_name='without_replication_or_region')
-        self.assertEquals(self.ring.devs, intended_devs)
+        self.assertEqual(self.ring.devs, intended_devs)
 
     def test_get_part(self):
         part1 = self.ring.get_part('a')
         nodes1 = self.ring.get_part_nodes(part1)
         part2, nodes2 = self.ring.get_nodes('a')
-        self.assertEquals(part1, part2)
-        self.assertEquals(nodes1, nodes2)
+        self.assertEqual(part1, part2)
+        self.assertEqual(nodes1, nodes2)
 
     def test_get_part_nodes(self):
         part, nodes = self.ring.get_nodes('a')
-        self.assertEquals(nodes, self.ring.get_part_nodes(part))
+        self.assertEqual(nodes, self.ring.get_part_nodes(part))
 
     def test_get_nodes(self):
         # Yes, these tests are deliberately very fragile. We want to make sure
         # that if someones changes the results the ring produces, they know it.
         self.assertRaises(TypeError, self.ring.get_nodes)
         part, nodes = self.ring.get_nodes('a')
-        self.assertEquals(part, 0)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[0],
-                          self.intended_devs[3]])])
+        self.assertEqual(part, 0)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[0],
+                                    self.intended_devs[3]])])
 
         part, nodes = self.ring.get_nodes('a1')
-        self.assertEquals(part, 0)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[0],
-                          self.intended_devs[3]])])
+        self.assertEqual(part, 0)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[0],
+                                    self.intended_devs[3]])])
 
         part, nodes = self.ring.get_nodes('a4')
-        self.assertEquals(part, 1)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[1],
-                          self.intended_devs[4]])])
+        self.assertEqual(part, 1)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[1],
+                                    self.intended_devs[4]])])
 
         part, nodes = self.ring.get_nodes('aa')
-        self.assertEquals(part, 1)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[1],
-                          self.intended_devs[4]])])
+        self.assertEqual(part, 1)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[1],
+                                    self.intended_devs[4]])])
 
         part, nodes = self.ring.get_nodes('a', 'c1')
-        self.assertEquals(part, 0)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[0],
-                          self.intended_devs[3]])])
+        self.assertEqual(part, 0)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[0],
+                                    self.intended_devs[3]])])
 
         part, nodes = self.ring.get_nodes('a', 'c0')
-        self.assertEquals(part, 3)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[1],
-                          self.intended_devs[4]])])
+        self.assertEqual(part, 3)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[1],
+                                    self.intended_devs[4]])])
 
         part, nodes = self.ring.get_nodes('a', 'c3')
-        self.assertEquals(part, 2)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[0],
-                          self.intended_devs[3]])])
+        self.assertEqual(part, 2)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[0],
+                                    self.intended_devs[3]])])
 
         part, nodes = self.ring.get_nodes('a', 'c2')
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[0],
-                          self.intended_devs[3]])])
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[0],
+                                    self.intended_devs[3]])])
 
         part, nodes = self.ring.get_nodes('a', 'c', 'o1')
-        self.assertEquals(part, 1)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[1],
-                          self.intended_devs[4]])])
+        self.assertEqual(part, 1)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[1],
+                                    self.intended_devs[4]])])
 
         part, nodes = self.ring.get_nodes('a', 'c', 'o5')
-        self.assertEquals(part, 0)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[0],
-                          self.intended_devs[3]])])
+        self.assertEqual(part, 0)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[0],
+                                    self.intended_devs[3]])])
 
         part, nodes = self.ring.get_nodes('a', 'c', 'o0')
-        self.assertEquals(part, 0)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[0],
-                          self.intended_devs[3]])])
+        self.assertEqual(part, 0)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[0],
+                                    self.intended_devs[3]])])
 
         part, nodes = self.ring.get_nodes('a', 'c', 'o2')
-        self.assertEquals(part, 2)
-        self.assertEquals(nodes, [dict(node, index=i) for i, node in
-                          enumerate([self.intended_devs[0],
-                          self.intended_devs[3]])])
+        self.assertEqual(part, 2)
+        self.assertEqual(nodes, [dict(node, index=i) for i, node in
+                         enumerate([self.intended_devs[0],
+                                    self.intended_devs[3]])])
 
     def add_dev_to_ring(self, new_dev):
         self.ring.devs.append(new_dev)
@@ -475,12 +492,13 @@ class TestRing(TestRingBase):
                               19, 55]
         rb = ring.RingBuilder(8, 3, 1)
         next_dev_id = 0
-        for zone in xrange(1, 10):
-            for server in xrange(1, 5):
-                for device in xrange(1, 4):
+        for zone in range(1, 10):
+            for server in range(1, 5):
+                for device in range(1, 4):
                     rb.add_dev({'id': next_dev_id,
                                 'ip': '1.2.%d.%d' % (zone, server),
-                                'port': 1234, 'zone': zone, 'region': 0,
+                                'port': 1234 + device,
+                                'zone': zone, 'region': 0,
                                 'weight': 1.0})
                     next_dev_id += 1
         rb.rebalance(seed=1)
@@ -488,23 +506,23 @@ class TestRing(TestRingBase):
         r = ring.Ring(self.testdir, ring_name='whatever')
         part, devs = r.get_nodes('a', 'c', 'o')
         primary_zones = set([d['zone'] for d in devs])
-        self.assertEquals(part, exp_part)
-        self.assertEquals([d['id'] for d in devs], exp_devs)
-        self.assertEquals(primary_zones, exp_zones)
+        self.assertEqual(part, exp_part)
+        self.assertEqual([d['id'] for d in devs], exp_devs)
+        self.assertEqual(primary_zones, exp_zones)
         devs = list(r.get_more_nodes(part))
-        self.assertEquals([d['id'] for d in devs], exp_handoffs)
+        self.assertEqual([d['id'] for d in devs], exp_handoffs)
 
         # The first 6 replicas plus the 3 primary nodes should cover all 9
         # zones in this test
         seen_zones = set(primary_zones)
         seen_zones.update([d['zone'] for d in devs[:6]])
-        self.assertEquals(seen_zones, set(range(1, 10)))
+        self.assertEqual(seen_zones, set(range(1, 10)))
 
         # The first handoff nodes for each partition in the ring
         devs = []
-        for part in xrange(r.partition_count):
-            devs.append(r.get_more_nodes(part).next()['id'])
-        self.assertEquals(devs, exp_first_handoffs)
+        for part in range(r.partition_count):
+            devs.append(next(r.get_more_nodes(part))['id'])
+        self.assertEqual(devs, exp_first_handoffs)
 
         # Add a new device we can handoff to.
         zone = 5
@@ -520,14 +538,14 @@ class TestRing(TestRingBase):
         # changed at all.
         part, devs = r.get_nodes('a', 'c', 'o')
         primary_zones = set([d['zone'] for d in devs])
-        self.assertEquals(part, exp_part)
-        self.assertEquals([d['id'] for d in devs], exp_devs)
-        self.assertEquals(primary_zones, exp_zones)
+        self.assertEqual(part, exp_part)
+        self.assertEqual([d['id'] for d in devs], exp_devs)
+        self.assertEqual(primary_zones, exp_zones)
         devs = list(r.get_more_nodes(part))
         dev_ids = [d['id'] for d in devs]
-        self.assertEquals(len(dev_ids), len(exp_handoffs))
+        self.assertEqual(len(dev_ids), len(exp_handoffs))
         for index, dev in enumerate(dev_ids):
-            self.assertEquals(
+            self.assertEqual(
                 dev, exp_handoffs[index],
                 'handoff differs at position %d\n%s\n%s' % (
                     index, dev_ids[index:], exp_handoffs[index:]))
@@ -535,13 +553,13 @@ class TestRing(TestRingBase):
         # The handoffs still cover all the non-primary zones first
         seen_zones = set(primary_zones)
         seen_zones.update([d['zone'] for d in devs[:6]])
-        self.assertEquals(seen_zones, set(range(1, 10)))
+        self.assertEqual(seen_zones, set(range(1, 10)))
 
         devs = []
-        for part in xrange(r.partition_count):
-            devs.append(r.get_more_nodes(part).next()['id'])
-        for part in xrange(r.partition_count):
-            self.assertEquals(
+        for part in range(r.partition_count):
+            devs.append(next(r.get_more_nodes(part))['id'])
+        for part in range(r.partition_count):
+            self.assertEqual(
                 devs[part], exp_first_handoffs[part],
                 'handoff for partitition %d is now device id %d' % (
                     part, devs[part]))
@@ -570,27 +588,27 @@ class TestRing(TestRingBase):
         # Test
         part, devs = r.get_nodes('a', 'c', 'o')
         primary_zones = set([d['zone'] for d in devs])
-        self.assertEquals(part, exp_part)
-        self.assertEquals([d['id'] for d in devs], exp_devs)
-        self.assertEquals(primary_zones, exp_zones)
+        self.assertEqual(part, exp_part)
+        self.assertEqual([d['id'] for d in devs], exp_devs)
+        self.assertEqual(primary_zones, exp_zones)
         devs = list(r.get_more_nodes(part))
         dev_ids = [d['id'] for d in devs]
-        self.assertEquals(len(dev_ids), len(exp_handoffs))
+        self.assertEqual(len(dev_ids), len(exp_handoffs))
         for index, dev in enumerate(dev_ids):
-            self.assertEquals(
+            self.assertEqual(
                 dev, exp_handoffs[index],
                 'handoff differs at position %d\n%s\n%s' % (
                     index, dev_ids[index:], exp_handoffs[index:]))
 
         seen_zones = set(primary_zones)
         seen_zones.update([d['zone'] for d in devs[:6]])
-        self.assertEquals(seen_zones, set(range(1, 10)))
+        self.assertEqual(seen_zones, set(range(1, 10)))
 
         devs = []
-        for part in xrange(r.partition_count):
-            devs.append(r.get_more_nodes(part).next()['id'])
-        for part in xrange(r.partition_count):
-            self.assertEquals(
+        for part in range(r.partition_count):
+            devs.append(next(r.get_more_nodes(part))['id'])
+        for part in range(r.partition_count):
+            self.assertEqual(
                 devs[part], exp_first_handoffs[part],
                 'handoff for partitition %d is now device id %d' % (
                     part, devs[part]))
@@ -650,28 +668,28 @@ class TestRing(TestRingBase):
         # Test
         part, devs = r.get_nodes('a', 'c', 'o')
         primary_zones = set([d['zone'] for d in devs])
-        self.assertEquals(part, exp_part)
-        self.assertEquals([d['id'] for d in devs], exp_devs)
-        self.assertEquals(primary_zones, exp_zones)
+        self.assertEqual(part, exp_part)
+        self.assertEqual([d['id'] for d in devs], exp_devs)
+        self.assertEqual(primary_zones, exp_zones)
         devs = list(r.get_more_nodes(part))
         dev_ids = [d['id'] for d in devs]
-        self.assertEquals(len(dev_ids), len(exp_handoffs))
+        self.assertEqual(len(dev_ids), len(exp_handoffs))
 
         for index, dev in enumerate(dev_ids):
-            self.assertEquals(
+            self.assertEqual(
                 dev, exp_handoffs[index],
                 'handoff differs at position %d\n%s\n%s' % (
                     index, dev_ids[index:], exp_handoffs[index:]))
 
         seen_zones = set(primary_zones)
         seen_zones.update([d['zone'] for d in devs[:6]])
-        self.assertEquals(seen_zones, set(range(1, 10)))
+        self.assertEqual(seen_zones, set(range(1, 10)))
 
         devs = []
-        for part in xrange(r.partition_count):
-            devs.append(r.get_more_nodes(part).next()['id'])
-        for part in xrange(r.partition_count):
-            self.assertEquals(
+        for part in range(r.partition_count):
+            devs.append(next(r.get_more_nodes(part))['id'])
+        for part in range(r.partition_count):
+            self.assertEqual(
                 devs[part], exp_first_handoffs[part],
                 'handoff for partitition %d is now device id %d' % (
                     part, devs[part]))
@@ -692,26 +710,26 @@ class TestRing(TestRingBase):
 
         part2, devs2 = r.get_nodes('a', 'c', 'o2')
         primary_zones2 = set([d['zone'] for d in devs2])
-        self.assertEquals(part2, exp_part2)
-        self.assertEquals([d['id'] for d in devs2], exp_devs2)
-        self.assertEquals(primary_zones2, exp_zones2)
+        self.assertEqual(part2, exp_part2)
+        self.assertEqual([d['id'] for d in devs2], exp_devs2)
+        self.assertEqual(primary_zones2, exp_zones2)
         devs2 = list(r.get_more_nodes(part2))
         dev_ids2 = [d['id'] for d in devs2]
 
-        self.assertEquals(len(dev_ids2), len(exp_handoffs2))
+        self.assertEqual(len(dev_ids2), len(exp_handoffs2))
         for index, dev in enumerate(dev_ids2):
-            self.assertEquals(
+            self.assertEqual(
                 dev, exp_handoffs2[index],
                 'handoff differs at position %d\n%s\n%s' % (
                     index, dev_ids2[index:], exp_handoffs2[index:]))
 
         seen_zones = set(primary_zones2)
         seen_zones.update([d['zone'] for d in devs2[:6]])
-        self.assertEquals(seen_zones, set(range(1, 10)))
+        self.assertEqual(seen_zones, set(range(1, 10)))
 
         # Test distribution across regions
         rb.set_replicas(3)
-        for region in xrange(1, 5):
+        for region in range(1, 5):
             rb.add_dev({'id': next_dev_id,
                         'ip': '1.%d.1.%d' % (region, server), 'port': 1234,
                         # 108.0 is the weight of all devices created prior to
@@ -735,14 +753,14 @@ class TestRing(TestRingBase):
 
         seen_regions = set(primary_regions)
         seen_regions.update([d['region'] for d in more_devs[:2]])
-        self.assertEquals(seen_regions, set(range(0, 5)))
+        self.assertEqual(seen_regions, set(range(0, 5)))
 
         # There are 13 zones now, so the first 13 nodes should all have
         # distinct zones (that's r0z0, r0z1, ..., r0z8, r1z1, r2z1, r3z1, and
         # r4z1).
         seen_zones = set(primary_zones)
         seen_zones.update([(d['region'], d['zone']) for d in more_devs[:10]])
-        self.assertEquals(13, len(seen_zones))
+        self.assertEqual(13, len(seen_zones))
 
         # Here's a brittle canary-in-the-coalmine test to make sure the region
         # handoff computation didn't change accidentally
@@ -756,9 +774,9 @@ class TestRing(TestRingBase):
                         51, 70, 82, 67, 68, 8, 95, 91, 55, 59, 85]
         dev_ids = [d['id'] for d in more_devs]
 
-        self.assertEquals(len(dev_ids), len(exp_handoffs))
+        self.assertEqual(len(dev_ids), len(exp_handoffs))
         for index, dev_id in enumerate(dev_ids):
-            self.assertEquals(
+            self.assertEqual(
                 dev_id, exp_handoffs[index],
                 'handoff differs at position %d\n%s\n%s' % (
                     index, dev_ids[index:], exp_handoffs[index:]))

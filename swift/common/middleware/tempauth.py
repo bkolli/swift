@@ -17,13 +17,14 @@ from __future__ import print_function
 
 from time import time
 from traceback import format_exc
-from urllib import unquote
 from uuid import uuid4
 from hashlib import sha1
 import hmac
 import base64
 
 from eventlet import Timeout
+import six
+from six.moves.urllib.parse import unquote
 from swift.common.swob import Response, Request
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, HTTPNotFound, \
     HTTPUnauthorized
@@ -71,16 +72,16 @@ class TempAuth(object):
 
     The reseller prefix specifies which parts of the account namespace this
     middleware is responsible for managing authentication and authorization.
-    By default, the prefix is AUTH so accounts and tokens are prefixed
-    by AUTH_. When a request's token and/or path start with AUTH_, this
+    By default, the prefix is 'AUTH' so accounts and tokens are prefixed
+    by 'AUTH\_'. When a request's token and/or path start with 'AUTH\_', this
     middleware knows it is responsible.
 
     We allow the reseller prefix to be a list. In tempauth, the first item
     in the list is used as the prefix for tokens and user groups. The
     other prefixes provide alternate accounts that user's can access. For
     example if the reseller prefix list is 'AUTH, OTHER', a user with
-    admin access to AUTH_account also has admin access to
-    OTHER_account.
+    admin access to 'AUTH_account' also has admin access to
+    'OTHER_account'.
 
     Required Group:
 
@@ -90,29 +91,34 @@ class TempAuth(object):
     to access an account. If you have several reseller prefix items, prefix
     the ``require_group`` parameter with the appropriate prefix.
 
-     X-Service-Token:
+    X-Service-Token:
 
-     If an X-Service-Token is presented in the request headers, the groups
-     derived from the token are appended to the roles derived form
-     X-Auth-Token. If X-Auth-Token is missing or invalid, X-Service-Token
-     is not processed.
+    If an X-Service-Token is presented in the request headers, the groups
+    derived from the token are appended to the roles derived from
+    X-Auth-Token. If X-Auth-Token is missing or invalid, X-Service-Token
+    is not processed.
 
-     The X-Service-Token is useful when combined with multiple reseller prefix
-     items. In the following configuration, accounts prefixed SERVICE_
-     are only accessible if X-Auth-Token is form the end-user and
-     X-Service-Token is from the ``glance`` user::
+    The X-Service-Token is useful when combined with multiple reseller prefix
+    items. In the following configuration, accounts prefixed 'SERVICE\_'
+    are only accessible if X-Auth-Token is from the end-user and
+    X-Service-Token is from the ``glance`` user::
 
-        [filter:tempauth]
-        use = egg:swift#tempauth
-        reseller_prefix = AUTH, SERVICE
-        SERVICE_require_group = .service
-        user_admin_admin = admin .admin .reseller_admin
-        user_joeacct_joe = joepw .admin
-        user_maryacct_mary = marypw .admin
-        user_glance_glance = glancepw .service
+       [filter:tempauth]
+       use = egg:swift#tempauth
+       reseller_prefix = AUTH, SERVICE
+       SERVICE_require_group = .service
+       user_admin_admin = admin .admin .reseller_admin
+       user_joeacct_joe = joepw .admin
+       user_maryacct_mary = marypw .admin
+       user_glance_glance = glancepw .service
 
-     The name .service is an example. Unlike .admin and .reseller_admin
-     it is not a reserved name.
+    The name .service is an example. Unlike .admin and .reseller_admin
+    it is not a reserved name.
+
+    Please note that ACLs can be set on service accounts and are matched
+    against the identity validated by X-Auth-Token. As such ACLs can grant
+    access to a service account's container without needing to provide a
+    service token, just like any other cross-reseller request using ACLs.
 
     Account ACLs:
         If a swift_owner issues a POST or PUT to the account, with the
@@ -455,7 +461,7 @@ class TempAuth(object):
             if not isinstance(result[key], list):
                 return "Value for key '%s' must be a list" % key
             for grantee in result[key]:
-                if not isinstance(grantee, basestring):
+                if not isinstance(grantee, six.string_types):
                     return "Elements of '%s' list must be strings" % key
 
         # Everything looks fine, no errors found
@@ -531,7 +537,7 @@ class TempAuth(object):
             return None
 
         if req.method == 'OPTIONS':
-            #allow OPTIONS requests to proceed as normal
+            # allow OPTIONS requests to proceed as normal
             self.logger.debug("Allow OPTIONS request.")
             return None
 
@@ -674,15 +680,15 @@ class TempAuth(object):
                 user = req.headers.get('x-auth-user')
                 if not user or ':' not in user:
                     self.logger.increment('token_denied')
-                    return HTTPUnauthorized(request=req, headers=
-                                            {'Www-Authenticate':
-                                             'Swift realm="%s"' % account})
+                    auth = 'Swift realm="%s"' % account
+                    return HTTPUnauthorized(request=req,
+                                            headers={'Www-Authenticate': auth})
                 account2, user = user.split(':', 1)
                 if account != account2:
                     self.logger.increment('token_denied')
-                    return HTTPUnauthorized(request=req, headers=
-                                            {'Www-Authenticate':
-                                             'Swift realm="%s"' % account})
+                    auth = 'Swift realm="%s"' % account
+                    return HTTPUnauthorized(request=req,
+                                            headers={'Www-Authenticate': auth})
             key = req.headers.get('x-storage-pass')
             if not key:
                 key = req.headers.get('x-auth-key')
@@ -692,9 +698,9 @@ class TempAuth(object):
                 user = req.headers.get('x-storage-user')
             if not user or ':' not in user:
                 self.logger.increment('token_denied')
-                return HTTPUnauthorized(request=req, headers=
-                                        {'Www-Authenticate':
-                                         'Swift realm="unknown"'})
+                auth = 'Swift realm="unknown"'
+                return HTTPUnauthorized(request=req,
+                                        headers={'Www-Authenticate': auth})
             account, user = user.split(':', 1)
             key = req.headers.get('x-auth-key')
             if not key:
@@ -711,14 +717,14 @@ class TempAuth(object):
         account_user = account + ':' + user
         if account_user not in self.users:
             self.logger.increment('token_denied')
-            return HTTPUnauthorized(request=req, headers=
-                                    {'Www-Authenticate':
-                                     'Swift realm="%s"' % account})
+            auth = 'Swift realm="%s"' % account
+            return HTTPUnauthorized(request=req,
+                                    headers={'Www-Authenticate': auth})
         if self.users[account_user]['key'] != key:
             self.logger.increment('token_denied')
-            return HTTPUnauthorized(request=req, headers=
-                                    {'Www-Authenticate':
-                                     'Swift realm="unknown"'})
+            auth = 'Swift realm="unknown"'
+            return HTTPUnauthorized(request=req,
+                                    headers={'Www-Authenticate': auth})
         account_id = self.users[account_user]['url'].rsplit('/', 1)[-1]
         # Get memcache client
         memcache_client = cache_from_env(req.environ)

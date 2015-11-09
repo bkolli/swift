@@ -24,32 +24,36 @@
 #   These shenanigans are to ensure all related objects can be garbage
 # collected. We've seen objects hang around forever otherwise.
 
+from six.moves.urllib.parse import quote
+
 import os
 import time
 import functools
 import inspect
-import logging
+import itertools
 import operator
 from sys import exc_info
 from swift import gettext_ as _
-from urllib import quote
 
 from eventlet import sleep
 from eventlet.timeout import Timeout
+import six
 
 from swift.common.wsgi import make_pre_authed_env
 from swift.common.utils import Timestamp, config_true_value, \
     public, split_path, list_from_csv, GreenthreadSafeIterator, \
-    GreenAsyncPile, quorum_size, parse_content_range
+    GreenAsyncPile, quorum_size, parse_content_type, \
+    http_response_to_document_iters, document_iters_to_http_response_body
 from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ChunkReadTimeout, ChunkWriteTimeout, \
-    ConnectionTimeout
+    ConnectionTimeout, RangeAlreadyComplete
 from swift.common.http import is_informational, is_success, is_redirection, \
     is_server_error, HTTP_OK, HTTP_PARTIAL_CONTENT, HTTP_MULTIPLE_CHOICES, \
     HTTP_BAD_REQUEST, HTTP_NOT_FOUND, HTTP_SERVICE_UNAVAILABLE, \
     HTTP_INSUFFICIENT_STORAGE, HTTP_UNAUTHORIZED, HTTP_CONTINUE
 from swift.common.swob import Request, Response, HeaderKeyDict, Range, \
-    HTTPException, HTTPRequestedRangeNotSatisfiable, HTTPServiceUnavailable
+    HTTPException, HTTPRequestedRangeNotSatisfiable, HTTPServiceUnavailable, \
+    status_map
 from swift.common.request_helpers import strip_sys_meta_prefix, \
     strip_user_meta_prefix, is_user_meta, is_sys_meta, is_sys_or_user_meta
 from swift.common.storage_policy import POLICIES
@@ -122,7 +126,7 @@ def _prep_headers_to_info(headers, server_type):
     meta = {}
     sysmeta = {}
     other = {}
-    for key, val in dict(headers).iteritems():
+    for key, val in dict(headers).items():
         lkey = key.lower()
         if is_user_meta(server_type, lkey):
             meta[strip_user_meta_prefix(server_type, lkey)] = val
@@ -313,6 +317,7 @@ def get_account_info(env, app, swift_source=None):
 
         This call bypasses auth. Success does not imply that the request has
         authorization to the account.
+
     :raises ValueError: when path can't be split(path, 2, 4)
     """
     (version, account, _junk, _junk) = \
@@ -467,7 +472,7 @@ def _get_info_cache(app, env, account, container=None):
         info = memcache.get(cache_key)
         if info:
             for key in info:
-                if isinstance(info[key], unicode):
+                if isinstance(info[key], six.text_type):
                     info[key] = info[key].encode("utf-8")
             env[env_key] = info
         return info
@@ -613,10 +618,9 @@ def bytes_to_skip(record_size, range_start):
     return (record_size - (range_start % record_size)) % record_size
 
 
-class GetOrHeadHandler(object):
-
+class ResumingGetter(object):
     def __init__(self, app, req, server_type, node_iter, partition, path,
-                 backend_headers, client_chunk_size=None):
+                 backend_headers, client_chunk_size=None, newest=None):
         self.app = app
         self.node_iter = node_iter
         self.server_type = server_type
@@ -632,13 +636,19 @@ class GetOrHeadHandler(object):
         self.req_method = req.method
         self.req_path = req.path
         self.req_query_string = req.query_string
-        self.newest = config_true_value(req.headers.get('x-newest', 'f'))
+        if newest is None:
+            self.newest = config_true_value(req.headers.get('x-newest', 'f'))
+        else:
+            self.newest = newest
 
         # populated when finding source
         self.statuses = []
         self.reasons = []
         self.bodies = []
         self.source_headers = []
+
+        # populated from response headers
+        self.start_byte = self.end_byte = self.length = None
 
     def fast_forward(self, num_bytes):
         """
@@ -648,57 +658,94 @@ class GetOrHeadHandler(object):
                            this request. This will change the Range header
                            so that the next req will start where it left off.
 
-        :raises NotImplementedError: if this is a multirange request
         :raises ValueError: if invalid range header
         :raises HTTPRequestedRangeNotSatisfiable: if begin + num_bytes
-                                                  > end of range
+                                                  > end of range + 1
+        :raises RangeAlreadyComplete: if begin + num_bytes == end of range + 1
         """
         if 'Range' in self.backend_headers:
             req_range = Range(self.backend_headers['Range'])
 
-            if len(req_range.ranges) > 1:
-                raise NotImplementedError()
-            begin, end = req_range.ranges.pop()
+            begin, end = req_range.ranges[0]
             if begin is None:
                 # this is a -50 range req (last 50 bytes of file)
                 end -= num_bytes
             else:
                 begin += num_bytes
-            if end and begin > end:
+            if end and begin == end + 1:
+                # we sent out exactly the first range's worth of bytes, so
+                # we're done with it
+                raise RangeAlreadyComplete()
+            elif end and begin > end:
                 raise HTTPRequestedRangeNotSatisfiable()
-            req_range.ranges = [(begin, end)]
+            elif end and begin:
+                req_range.ranges = [(begin, end)] + req_range.ranges[1:]
+            elif end:
+                req_range.ranges = [(None, end)] + req_range.ranges[1:]
+            else:
+                req_range.ranges = [(begin, None)] + req_range.ranges[1:]
+
             self.backend_headers['Range'] = str(req_range)
         else:
             self.backend_headers['Range'] = 'bytes=%d-' % num_bytes
 
-    def learn_size_from_content_range(self, start, end):
+    def pop_range(self):
+        """
+        Remove the first byterange from our Range header.
+
+        This is used after a byterange has been completely sent to the
+        client; this way, should we need to resume the download from another
+        object server, we do not re-fetch byteranges that the client already
+        has.
+
+        If we have no Range header, this is a no-op.
+        """
+        if 'Range' in self.backend_headers:
+            try:
+                req_range = Range(self.backend_headers['Range'])
+            except ValueError:
+                # there's a Range header, but it's garbage, so get rid of it
+                self.backend_headers.pop('Range')
+                return
+            begin, end = req_range.ranges.pop(0)
+            if len(req_range.ranges) > 0:
+                self.backend_headers['Range'] = str(req_range)
+            else:
+                self.backend_headers.pop('Range')
+
+    def learn_size_from_content_range(self, start, end, length):
         """
         If client_chunk_size is set, makes sure we yield things starting on
         chunk boundaries based on the Content-Range header in the response.
 
-        Sets our first Range header to the value learned from the
-        Content-Range header in the response; if we were given a
+        Sets our Range header's first byterange to the value learned from
+        the Content-Range header in the response; if we were given a
         fully-specified range (e.g. "bytes=123-456"), this is a no-op.
 
         If we were given a half-specified range (e.g. "bytes=123-" or
         "bytes=-456"), then this changes the Range header to a
         semantically-equivalent one *and* it lets us resume on a proper
         boundary instead of just in the middle of a piece somewhere.
-
-        If the original request is for more than one range, this does not
-        affect our backend Range header, since we don't support resuming one
-        of those anyway.
         """
+        if length == 0:
+            return
+
         if self.client_chunk_size:
             self.skip_bytes = bytes_to_skip(self.client_chunk_size, start)
 
         if 'Range' in self.backend_headers:
-            req_range = Range(self.backend_headers['Range'])
+            try:
+                req_range = Range(self.backend_headers['Range'])
+                new_ranges = [(start, end)] + req_range.ranges[1:]
+            except ValueError:
+                new_ranges = [(start, end)]
+        else:
+            new_ranges = [(start, end)]
 
-            if len(req_range.ranges) > 1:
-                return
-
-            self.backend_headers['Range'] = "bytes=%d-%d" % (start, end)
+        self.backend_headers['Range'] = (
+            "bytes=" + (",".join("%s-%s" % (s if s is not None else '',
+                                            e if e is not None else '')
+                                 for s, e in new_ranges)))
 
     def is_good_source(self, src):
         """
@@ -712,106 +759,188 @@ class GetOrHeadHandler(object):
             return True
         return is_success(src.status) or is_redirection(src.status)
 
-    def _make_app_iter(self, req, node, source):
-        """
-        Returns an iterator over the contents of the source (via its read
-        func).  There is also quite a bit of cleanup to ensure garbage
-        collection works and the underlying socket of the source is closed.
+    def response_parts_iter(self, req):
+        source, node = self._get_source_and_node()
+        it = None
+        if source:
+            it = self._get_response_parts_iter(req, node, source)
+        return it
 
-        :param req: incoming request object
-        :param source: The httplib.Response object this iterator should read
-                       from.
-        :param node: The node the source is reading from, for logging purposes.
-        """
+    def _get_response_parts_iter(self, req, node, source):
+        # Someday we can replace this [mess] with python 3's "nonlocal"
+        source = [source]
+        node = [node]
+
         try:
-            nchunks = 0
             client_chunk_size = self.client_chunk_size
-            bytes_consumed_from_backend = 0
             node_timeout = self.app.node_timeout
             if self.server_type == 'Object':
                 node_timeout = self.app.recoverable_node_timeout
-            buf = ''
-            while True:
-                try:
-                    with ChunkReadTimeout(node_timeout):
-                        chunk = source.read(self.app.object_chunk_size)
-                        nchunks += 1
-                        buf += chunk
-                except ChunkReadTimeout:
-                    exc_type, exc_value, exc_traceback = exc_info()
-                    if self.newest or self.server_type != 'Object':
-                        raise exc_type, exc_value, exc_traceback
+
+            # This is safe; it sets up a generator but does not call next()
+            # on it, so no IO is performed.
+            parts_iter = [
+                http_response_to_document_iters(
+                    source[0], read_chunk_size=self.app.object_chunk_size)]
+
+            def get_next_doc_part():
+                while True:
                     try:
-                        self.fast_forward(bytes_consumed_from_backend)
-                    except (NotImplementedError, HTTPException, ValueError):
-                        raise exc_type, exc_value, exc_traceback
-                    buf = ''
-                    new_source, new_node = self._get_source_and_node()
-                    if new_source:
-                        self.app.exception_occurred(
-                            node, _('Object'),
-                            _('Trying to read during GET (retrying)'),
-                            level=logging.ERROR, exc_info=(
-                                exc_type, exc_value, exc_traceback))
-                        # Close-out the connection as best as possible.
-                        if getattr(source, 'swift_conn', None):
-                            close_swift_conn(source)
-                        source = new_source
-                        node = new_node
-                        continue
-                    else:
-                        raise exc_type, exc_value, exc_traceback
+                        # This call to next() performs IO when we have a
+                        # multipart/byteranges response; it reads the MIME
+                        # boundary and part headers.
+                        #
+                        # If we don't have a multipart/byteranges response,
+                        # but just a 200 or a single-range 206, then this
+                        # performs no IO, and either just returns source or
+                        # raises StopIteration.
+                        with ChunkReadTimeout(node_timeout):
+                            # if StopIteration is raised, it escapes and is
+                            # handled elsewhere
+                            start_byte, end_byte, length, headers, part = next(
+                                parts_iter[0])
+                        return (start_byte, end_byte, length, headers, part)
+                    except ChunkReadTimeout:
+                        new_source, new_node = self._get_source_and_node()
+                        if new_source:
+                            self.app.exception_occurred(
+                                node[0], _('Object'),
+                                _('Trying to read during GET (retrying)'))
+                            # Close-out the connection as best as possible.
+                            if getattr(source[0], 'swift_conn', None):
+                                close_swift_conn(source[0])
+                            source[0] = new_source
+                            node[0] = new_node
+                            # This is safe; it sets up a generator but does
+                            # not call next() on it, so no IO is performed.
+                            parts_iter[0] = http_response_to_document_iters(
+                                new_source,
+                                read_chunk_size=self.app.object_chunk_size)
+                        else:
+                            raise StopIteration()
 
-                if buf and self.skip_bytes:
-                    if self.skip_bytes < len(buf):
-                        buf = buf[self.skip_bytes:]
-                        bytes_consumed_from_backend += self.skip_bytes
-                        self.skip_bytes = 0
-                    else:
-                        self.skip_bytes -= len(buf)
-                        bytes_consumed_from_backend += len(buf)
+            def iter_bytes_from_response_part(part_file):
+                nchunks = 0
+                buf = ''
+                bytes_used_from_backend = 0
+                while True:
+                    try:
+                        with ChunkReadTimeout(node_timeout):
+                            chunk = part_file.read(self.app.object_chunk_size)
+                            nchunks += 1
+                            buf += chunk
+                    except ChunkReadTimeout:
+                        exc_type, exc_value, exc_traceback = exc_info()
+                        if self.newest or self.server_type != 'Object':
+                            six.reraise(exc_type, exc_value, exc_traceback)
+                        try:
+                            self.fast_forward(bytes_used_from_backend)
+                        except (HTTPException, ValueError):
+                            six.reraise(exc_type, exc_value, exc_traceback)
+                        except RangeAlreadyComplete:
+                            break
                         buf = ''
+                        new_source, new_node = self._get_source_and_node()
+                        if new_source:
+                            self.app.exception_occurred(
+                                node[0], _('Object'),
+                                _('Trying to read during GET (retrying)'))
+                            # Close-out the connection as best as possible.
+                            if getattr(source[0], 'swift_conn', None):
+                                close_swift_conn(source[0])
+                            source[0] = new_source
+                            node[0] = new_node
+                            # This is safe; it just sets up a generator but
+                            # does not call next() on it, so no IO is
+                            # performed.
+                            parts_iter[0] = http_response_to_document_iters(
+                                new_source,
+                                read_chunk_size=self.app.object_chunk_size)
 
-                if not chunk:
-                    if buf:
-                        with ChunkWriteTimeout(self.app.client_timeout):
-                            bytes_consumed_from_backend += len(buf)
-                            yield buf
-                        buf = ''
-                    break
+                            try:
+                                _junk, _junk, _junk, _junk, part_file = \
+                                    get_next_doc_part()
+                            except StopIteration:
+                                # Tried to find a new node from which to
+                                # finish the GET, but failed. There's
+                                # nothing more to do here.
+                                return
+                        else:
+                            six.reraise(exc_type, exc_value, exc_traceback)
+                    else:
+                        if buf and self.skip_bytes:
+                            if self.skip_bytes < len(buf):
+                                buf = buf[self.skip_bytes:]
+                                bytes_used_from_backend += self.skip_bytes
+                                self.skip_bytes = 0
+                            else:
+                                self.skip_bytes -= len(buf)
+                                bytes_used_from_backend += len(buf)
+                                buf = ''
 
-                if client_chunk_size is not None:
-                    while len(buf) >= client_chunk_size:
-                        client_chunk = buf[:client_chunk_size]
-                        buf = buf[client_chunk_size:]
-                        with ChunkWriteTimeout(self.app.client_timeout):
-                            yield client_chunk
-                        bytes_consumed_from_backend += len(client_chunk)
-                else:
-                    with ChunkWriteTimeout(self.app.client_timeout):
-                        yield buf
-                    bytes_consumed_from_backend += len(buf)
-                    buf = ''
+                        if not chunk:
+                            if buf:
+                                with ChunkWriteTimeout(
+                                        self.app.client_timeout):
+                                    bytes_used_from_backend += len(buf)
+                                    yield buf
+                                buf = ''
+                            break
 
-                # This is for fairness; if the network is outpacing the CPU,
-                # we'll always be able to read and write data without
-                # encountering an EWOULDBLOCK, and so eventlet will not switch
-                # greenthreads on its own. We do it manually so that clients
-                # don't starve.
-                #
-                # The number 5 here was chosen by making stuff up. It's not
-                # every single chunk, but it's not too big either, so it seemed
-                # like it would probably be an okay choice.
-                #
-                # Note that we may trampoline to other greenthreads more often
-                # than once every 5 chunks, depending on how blocking our
-                # network IO is; the explicit sleep here simply provides a
-                # lower bound on the rate of trampolining.
-                if nchunks % 5 == 0:
-                    sleep()
+                        if client_chunk_size is not None:
+                            while len(buf) >= client_chunk_size:
+                                client_chunk = buf[:client_chunk_size]
+                                buf = buf[client_chunk_size:]
+                                with ChunkWriteTimeout(
+                                        self.app.client_timeout):
+                                    yield client_chunk
+                                bytes_used_from_backend += len(client_chunk)
+                        else:
+                            with ChunkWriteTimeout(self.app.client_timeout):
+                                yield buf
+                            bytes_used_from_backend += len(buf)
+                            buf = ''
+
+                        # This is for fairness; if the network is outpacing
+                        # the CPU, we'll always be able to read and write
+                        # data without encountering an EWOULDBLOCK, and so
+                        # eventlet will not switch greenthreads on its own.
+                        # We do it manually so that clients don't starve.
+                        #
+                        # The number 5 here was chosen by making stuff up.
+                        # It's not every single chunk, but it's not too big
+                        # either, so it seemed like it would probably be an
+                        # okay choice.
+                        #
+                        # Note that we may trampoline to other greenthreads
+                        # more often than once every 5 chunks, depending on
+                        # how blocking our network IO is; the explicit sleep
+                        # here simply provides a lower bound on the rate of
+                        # trampolining.
+                        if nchunks % 5 == 0:
+                            sleep()
+
+            part_iter = None
+            try:
+                while True:
+                    start_byte, end_byte, length, headers, part = \
+                        get_next_doc_part()
+                    self.learn_size_from_content_range(
+                        start_byte, end_byte, length)
+                    part_iter = iter_bytes_from_response_part(part)
+                    yield {'start_byte': start_byte, 'end_byte': end_byte,
+                           'entity_length': length, 'headers': headers,
+                           'part_iter': part_iter}
+                    self.pop_range()
+            except GeneratorExit:
+                if part_iter:
+                    part_iter.close()
+                raise
+            except StopIteration:
+                req.environ['swift.non_client_disconnect'] = True
 
         except ChunkReadTimeout:
-            self.app.exception_occurred(node, _('Object'),
+            self.app.exception_occurred(node[0], _('Object'),
                                         _('Trying to read during GET'))
             raise
         except ChunkWriteTimeout:
@@ -827,8 +956,22 @@ class GetOrHeadHandler(object):
             raise
         finally:
             # Close-out the connection as best as possible.
-            if getattr(source, 'swift_conn', None):
-                close_swift_conn(source)
+            if getattr(source[0], 'swift_conn', None):
+                close_swift_conn(source[0])
+
+    @property
+    def last_status(self):
+        if self.statuses:
+            return self.statuses[-1]
+        else:
+            return None
+
+    @property
+    def last_headers(self):
+        if self.source_headers:
+            return self.source_headers[-1]
+        else:
+            return None
 
     def _get_source_and_node(self):
         self.statuses = []
@@ -869,7 +1012,7 @@ class GetOrHeadHandler(object):
                     self.statuses.append(HTTP_NOT_FOUND)
                     self.reasons.append('')
                     self.bodies.append('')
-                    self.source_headers.append('')
+                    self.source_headers.append([])
                     close_swift_conn(possible_source)
                 else:
                     if self.used_source_etag:
@@ -883,13 +1026,13 @@ class GetOrHeadHandler(object):
                             self.statuses.append(HTTP_NOT_FOUND)
                             self.reasons.append('')
                             self.bodies.append('')
-                            self.source_headers.append('')
+                            self.source_headers.append([])
                             continue
 
                     self.statuses.append(possible_source.status)
                     self.reasons.append(possible_source.reason)
-                    self.bodies.append('')
-                    self.source_headers.append('')
+                    self.bodies.append(None)
+                    self.source_headers.append(possible_source.getheaders())
                     sources.append((possible_source, node))
                     if not self.newest:  # one good source is enough
                         break
@@ -917,11 +1060,56 @@ class GetOrHeadHandler(object):
             src_headers = dict(
                 (k.lower(), v) for k, v in
                 possible_source.getheaders())
+
+            # Save off the source etag so that, if we lose the connection
+            # and have to resume from a different node, we can be sure that
+            # we have the same object (replication) or a fragment archive
+            # from the same object (EC). Otherwise, if the cluster has two
+            # versions of the same object, we might end up switching between
+            # old and new mid-stream and giving garbage to the client.
             self.used_source_etag = src_headers.get(
                 'x-object-sysmeta-ec-etag',
                 src_headers.get('etag', '')).strip('"')
             return source, node
         return None, None
+
+
+class GetOrHeadHandler(ResumingGetter):
+    def _make_app_iter(self, req, node, source):
+        """
+        Returns an iterator over the contents of the source (via its read
+        func).  There is also quite a bit of cleanup to ensure garbage
+        collection works and the underlying socket of the source is closed.
+
+        :param req: incoming request object
+        :param source: The httplib.Response object this iterator should read
+                       from.
+        :param node: The node the source is reading from, for logging purposes.
+        """
+
+        ct = source.getheader('Content-Type')
+        if ct:
+            content_type, content_type_attrs = parse_content_type(ct)
+            is_multipart = content_type == 'multipart/byteranges'
+        else:
+            is_multipart = False
+
+        boundary = "dontcare"
+        if is_multipart:
+            # we need some MIME boundary; fortunately, the object server has
+            # furnished one for us, so we'll just re-use it
+            boundary = dict(content_type_attrs)["boundary"]
+
+        parts_iter = self._get_response_parts_iter(req, node, source)
+
+        def add_content_type(response_part):
+            response_part["content_type"] = \
+                HeaderKeyDict(response_part["headers"]).get("Content-Type")
+            return response_part
+
+        return document_iters_to_http_response_body(
+            (add_content_type(pi) for pi in parts_iter),
+            boundary, is_multipart, self.app.logger)
 
     def get_working_response(self, req):
         source, node = self._get_source_and_node()
@@ -932,10 +1120,6 @@ class GetOrHeadHandler(object):
             update_headers(res, source.getheaders())
             if req.method == 'GET' and \
                     source.status in (HTTP_OK, HTTP_PARTIAL_CONTENT):
-                cr = res.headers.get('Content-Range')
-                if cr:
-                    start, end, total = parse_content_range(cr)
-                    self.learn_size_from_content_range(start, end)
                 res.app_iter = self._make_app_iter(req, node, source)
                 # See NOTE: swift_conn at top of file about this.
                 res.swift_conn = source.swift_conn
@@ -949,6 +1133,99 @@ class GetOrHeadHandler(object):
                 res.charset = None
                 res.content_type = source.getheader('Content-Type')
         return res
+
+
+class NodeIter(object):
+    """
+    Yields nodes for a ring partition, skipping over error
+    limited nodes and stopping at the configurable number of nodes. If a
+    node yielded subsequently gets error limited, an extra node will be
+    yielded to take its place.
+
+    Note that if you're going to iterate over this concurrently from
+    multiple greenthreads, you'll want to use a
+    swift.common.utils.GreenthreadSafeIterator to serialize access.
+    Otherwise, you may get ValueErrors from concurrent access. (You also
+    may not, depending on how logging is configured, the vagaries of
+    socket IO and eventlet, and the phase of the moon.)
+
+    :param app: a proxy app
+    :param ring: ring to get yield nodes from
+    :param partition: ring partition to yield nodes for
+    :param node_iter: optional iterable of nodes to try. Useful if you
+        want to filter or reorder the nodes.
+    """
+
+    def __init__(self, app, ring, partition, node_iter=None):
+        self.app = app
+        self.ring = ring
+        self.partition = partition
+
+        part_nodes = ring.get_part_nodes(partition)
+        if node_iter is None:
+            node_iter = itertools.chain(
+                part_nodes, ring.get_more_nodes(partition))
+        num_primary_nodes = len(part_nodes)
+        self.nodes_left = self.app.request_node_count(num_primary_nodes)
+        self.expected_handoffs = self.nodes_left - num_primary_nodes
+
+        # Use of list() here forcibly yanks the first N nodes (the primary
+        # nodes) from node_iter, so the rest of its values are handoffs.
+        self.primary_nodes = self.app.sort_nodes(
+            list(itertools.islice(node_iter, num_primary_nodes)))
+        self.handoff_iter = node_iter
+
+    def __iter__(self):
+        self._node_iter = self._node_gen()
+        return self
+
+    def log_handoffs(self, handoffs):
+        """
+        Log handoff requests if handoff logging is enabled and the
+        handoff was not expected.
+
+        We only log handoffs when we've pushed the handoff count further
+        than we would normally have expected under normal circumstances,
+        that is (request_node_count - num_primaries), when handoffs goes
+        higher than that it means one of the primaries must have been
+        skipped because of error limiting before we consumed all of our
+        nodes_left.
+        """
+        if not self.app.log_handoffs:
+            return
+        extra_handoffs = handoffs - self.expected_handoffs
+        if extra_handoffs > 0:
+            self.app.logger.increment('handoff_count')
+            self.app.logger.warning(
+                'Handoff requested (%d)' % handoffs)
+            if (extra_handoffs == len(self.primary_nodes)):
+                # all the primaries were skipped, and handoffs didn't help
+                self.app.logger.increment('handoff_all_count')
+
+    def _node_gen(self):
+        for node in self.primary_nodes:
+            if not self.app.error_limited(node):
+                yield node
+                if not self.app.error_limited(node):
+                    self.nodes_left -= 1
+                    if self.nodes_left <= 0:
+                        return
+        handoffs = 0
+        for node in self.handoff_iter:
+            if not self.app.error_limited(node):
+                handoffs += 1
+                self.log_handoffs(handoffs)
+                yield node
+                if not self.app.error_limited(node):
+                    self.nodes_left -= 1
+                    if self.nodes_left <= 0:
+                        return
+
+    def next(self):
+        return next(self._node_iter)
+
+    def __next__(self):
+        return self.next()
 
 
 class Controller(object):
@@ -1004,14 +1281,14 @@ class Controller(object):
                            k.lower() in self._x_remove_headers())
 
         dst_headers.update((k.lower(), v)
-                           for k, v in src_headers.iteritems()
+                           for k, v in src_headers.items()
                            if k.lower() in self.pass_through_headers or
                            is_sys_or_user_meta(st, k))
 
     def generate_request_headers(self, orig_req=None, additional=None,
                                  transfer=False):
         """
-        Create a list of headers to be used in backend requets
+        Create a list of headers to be used in backend requests
 
         :param orig_req: the original request sent by the client to the proxy
         :param additional: additional headers to send to the backend
@@ -1273,7 +1550,6 @@ class Controller(object):
                 [(i, s) for i, s in enumerate(statuses)
                  if hundred <= s < hundred + 100]
             if len(hstatuses) >= quorum_size:
-                resp = Response(request=req)
                 try:
                     status_index, status = max(
                         ((i, stat) for i, stat in hstatuses
@@ -1282,6 +1558,7 @@ class Controller(object):
                 except ValueError:
                     # All statuses were indices to avoid
                     continue
+                resp = status_map[status](request=req)
                 resp.status = '%s %s' % (status, reasons[status_index])
                 resp.body = bodies[status_index]
                 if headers:
@@ -1326,7 +1603,7 @@ class Controller(object):
         # transfer any x-account-sysmeta headers from original request
         # to the autocreate PUT
         headers.update((k, v)
-                       for k, v in req.headers.iteritems()
+                       for k, v in req.headers.items()
                        if is_sys_meta('account', k))
         resp = self.make_requests(Request.blank('/v1' + path),
                                   self.app.account_ring, partition, 'PUT',
@@ -1455,7 +1732,8 @@ class Controller(object):
                 list_from_csv(req.headers['Access-Control-Request-Headers']))
 
         # Populate the response with the CORS preflight headers
-        if cors.get('allow_origin', '').strip() == '*':
+        if cors.get('allow_origin') and \
+                cors.get('allow_origin').strip() == '*':
             headers['access-control-allow-origin'] = '*'
         else:
             headers['access-control-allow-origin'] = req_origin_value

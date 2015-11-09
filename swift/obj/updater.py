@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import cPickle as pickle
+import six.moves.cPickle as pickle
 import os
 import signal
 import sys
@@ -48,7 +48,7 @@ class ObjectUpdater(Daemon):
         self.container_ring = None
         self.concurrency = int(conf.get('concurrency', 1))
         self.slowdown = float(conf.get('slowdown', 0.01))
-        self.node_timeout = int(conf.get('node_timeout', 10))
+        self.node_timeout = float(conf.get('node_timeout', 10))
         self.conn_timeout = float(conf.get('conn_timeout', 0.5))
         self.successes = 0
         self.failures = 0
@@ -256,7 +256,7 @@ class ObjectUpdater(Daemon):
 
         :param node: node dictionary from the container ring
         :param part: partition that holds the container
-        :param op: operation performed (ex: 'POST' or 'DELETE')
+        :param op: operation performed (ex: 'PUT' or 'DELETE')
         :param obj: object name being updated
         :param headers_out: headers to send with the update
         """

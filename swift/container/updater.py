@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import print_function
 import logging
 import os
 import signal
@@ -48,7 +49,7 @@ class ContainerUpdater(Daemon):
         self.account_ring = None
         self.concurrency = int(conf.get('concurrency', 4))
         self.slowdown = float(conf.get('slowdown', 0.01))
-        self.node_timeout = int(conf.get('node_timeout', 3))
+        self.node_timeout = float(conf.get('node_timeout', 3))
         self.conn_timeout = float(conf.get('conn_timeout', 0.5))
         self.no_changes = 0
         self.successes = 0
@@ -121,7 +122,7 @@ class ContainerUpdater(Daemon):
             begin = time.time()
             now = time.time()
             expired_suppressions = \
-                [a for a, u in self.account_suppressions.iteritems()
+                [a for a, u in self.account_suppressions.items()
                  if u < now]
             for account in expired_suppressions:
                 del self.account_suppressions[account]
@@ -254,8 +255,8 @@ class ContainerUpdater(Daemon):
                 self.account_suppressions[info['account']] = until = \
                     time.time() + self.account_suppression_time
                 if self.new_account_suppressions:
-                    print >>self.new_account_suppressions, \
-                        info['account'], until
+                    print(info['account'], until,
+                          file=self.new_account_suppressions)
             # Only track timing data for attempted updates:
             self.logger.timing_since('timing', start_time)
         else:
